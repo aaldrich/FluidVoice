@@ -22,11 +22,7 @@ struct DictationProviderRoute: Equatable {
         let configuredModel: String?
 
         if let dictationSlot {
-            let selection = self.effectivePromptSelection(
-                settings: settings,
-                dictationSlot: dictationSlot,
-                appBundleID: appBundleID
-            )
+            let selection = settings.resolvedDictationPromptSelection(for: dictationSlot, appBundleID: appBundleID)
             if selection == .off {
                 return Self(providerID: "", providerKey: "", baseURL: "", model: "", apiKey: "")
             }
@@ -57,6 +53,10 @@ struct DictationProviderRoute: Equatable {
             configuredModel = nil
         }
 
+        return self.build(settings: settings, selectedProviderID: selectedProviderID, configuredModel: configuredModel)
+    }
+
+    private static func build(settings: SettingsStore, selectedProviderID: String, configuredModel: String?) -> Self {
         let selectedModels = settings.selectedModelByProvider
         let providerKeys = settings.providerAPIKeys
 
@@ -88,6 +88,38 @@ struct DictationProviderRoute: Equatable {
             model: configuredModel ?? selectedModels[selectedProviderID] ?? "",
             apiKey: providerKeys[selectedProviderID] ?? ""
         )
+    }
+
+    /// Where `.default` would route for dictation, regardless of what is selected now.
+    /// Mirrors the `.default` branch of `resolve` so the picker can drop an option that
+    /// would otherwise render as "Default · Unavailable".
+    static func resolveDictationDefault(settings: SettingsStore, appBundleID: String? = nil) -> Self {
+        let configuration = settings.dictationPromptConfiguration(for: .default)
+        let providerID = configuration.providerID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let model = configuration.modelName.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !providerID.isEmpty, !model.isEmpty {
+            return self.build(settings: settings, selectedProviderID: providerID, configuredModel: model)
+        }
+        let hasAppBinding = settings.appPromptBinding(for: .dictate, appBundleID: appBundleID) != nil
+        if !hasAppBinding, self.shouldUseLegacyPrivateAIRoute(
+            selectedProviderID: settings.selectedProviderID,
+            configuredProviderID: providerID,
+            configuredModel: model
+        ) {
+            return self.privateAIRoute(settings: settings)
+        }
+        return self.build(
+            settings: settings,
+            selectedProviderID: self.externalFallbackProviderID(from: settings.selectedProviderID),
+            configuredModel: nil
+        )
+    }
+
+    /// True when picking "Default" would actually reach a configured, verified provider.
+    static func isDictationDefaultAvailable(settings: SettingsStore, appBundleID: String? = nil) -> Bool {
+        let route = self.resolveDictationDefault(settings: settings, appBundleID: appBundleID)
+        guard !route.providerID.isEmpty, !route.model.isEmpty else { return false }
+        return DictationAIPostProcessingGate.isProviderConfigured(providerID: route.providerID, model: route.model)
     }
 
     static func privateAIRoute(settings: SettingsStore) -> Self {
@@ -160,30 +192,6 @@ struct DictationProviderRoute: Equatable {
         }
         return self.resolve(settings: settings, dictationSlot: dictationSlot)
     }
-
-    private static func effectivePromptSelection(
-        settings: SettingsStore,
-        dictationSlot: SettingsStore.DictationShortcutSlot,
-        appBundleID: String?
-    ) -> SettingsStore.DictationPromptSelection {
-        let selection = settings.dictationPromptSelection(for: dictationSlot)
-        guard selection != .off else { return selection }
-
-        let usesOnlyAppBindings = settings.promptRoutingScope(for: .dictate) == .selectedAppsOnly
-        let supportsAppOverride = SettingsStore.dictationSelectionSupportsAppOverride(selection)
-        guard usesOnlyAppBindings || supportsAppOverride else { return selection }
-        guard let binding = settings.appPromptBinding(for: .dictate, appBundleID: appBundleID) else {
-            return usesOnlyAppBindings ? .off : selection
-        }
-        guard let promptID = binding.promptID,
-              settings.dictationPromptProfiles.contains(where: {
-                  $0.id == promptID && $0.mode.normalized == .dictate
-              })
-        else {
-            return .default
-        }
-        return .profile(promptID)
-    }
 }
 
 @MainActor
@@ -199,6 +207,11 @@ final class DictationPostProcessingService {
     }
 
     func process(_ inputText: String, dictationSlot: SettingsStore.DictationShortcutSlot = .primary) async throws -> Result {
+        guard let summaryActivity = MeetingSummaryActivityCoordinator.shared.beginProcessing() else {
+            throw MeetingModelResidencyError.busy
+        }
+        defer { MeetingSummaryActivityCoordinator.shared.endProcessing(summaryActivity) }
+
         let trimmed = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             return Result(text: "", providerID: SettingsStore.shared.selectedProviderID, model: "")
@@ -248,6 +261,7 @@ final class DictationPostProcessingService {
                     appVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String
                 )
             )
+            settings.recordFluidIntelligenceUse(output: response.outputText)
             return Result(
                 text: ASRService.applyGAAVFormatting(response.outputText),
                 providerID: resolved.providerID,
@@ -256,11 +270,7 @@ final class DictationPostProcessingService {
         }
 
         let promptText = settings.effectiveDictationSystemPrompt(for: dictationSlot, appBundleID: nil)
-        let systemPrompt = ""
-        let userMessageContent = SettingsStore.renderDictationUserMessage(
-            promptText: promptText,
-            transcript: trimmed
-        )
+        let request = DictationPromptRequest(promptText: promptText, transcript: trimmed)
 
         guard !resolved.model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw AIProcessingError.missingModel(provider: resolved.providerKey)
@@ -278,14 +288,8 @@ final class DictationPostProcessingService {
                 : config.parameterValue
         }
 
-        var messages: [[String: Any]] = []
-        if !systemPrompt.isEmpty {
-            messages.append(["role": "system", "content": systemPrompt])
-        }
-        messages.append(["role": "user", "content": userMessageContent])
-
         var config = LLMClient.Config(
-            messages: messages,
+            messages: request.messages,
             model: resolved.model,
             baseURL: resolved.baseURL,
             apiKey: resolved.apiKey,

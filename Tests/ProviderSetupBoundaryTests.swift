@@ -6,18 +6,21 @@ final class UserDefaults {
     var values: [String: [String]] = [:]
     // Match Foundation UserDefaults, including an absent key.
     // swiftlint:disable:next discouraged_optional_collection
-    func stringArray(forKey key: String) -> [String]? { values[key] }
-    func set(_ value: [String], forKey key: String) { values[key] = value }
+    func stringArray(forKey key: String) -> [String]? { self.values[key] }
+    func set(_ value: [String], forKey key: String) { self.values[key] = value }
 }
+
 struct PrivateAIProviderFeature {
     static let shared = PrivateAIProviderFeature()
     let providerID = "fluid"
 }
+
 struct ModelRepository {
     static let shared = ModelRepository()
     func isBuiltIn(_ id: String) -> Bool { ["openai", "ollama", "fluid"].contains(id) }
     func defaultModels(for id: String) -> [String] { ["default-model"] }
 }
+
 final class SettingsStore {
     struct SavedProvider {
         var id = UUID().uuidString
@@ -25,11 +28,13 @@ final class SettingsStore {
         let baseURL: String
         let models: [String]
     }
+
     struct Configuration: Equatable {
         var providerID: String
         var modelName = "model"
         var shortcut = "keep-shortcut"
     }
+
     var selectedProviderID = "fluid"
     var selectedModel: String? = "mini"
     var rewriteModeSelectedProviderID = ""
@@ -41,12 +46,14 @@ final class SettingsStore {
     var dictationPromptConfigurations: [String: Configuration] = [:]
     var verifiedProviderFingerprints: [String: String] = [:]
 }
+
 final class AIEnhancementSettingsViewModel {
     struct ProviderItemData {
         let id: String
         let name: String
         let isBuiltIn: Bool
     }
+
     let settings = SettingsStore()
     var isTestingConnection = false
     var isFetchingModels = false
@@ -63,25 +70,29 @@ final class AIEnhancementSettingsViewModel {
     var keySaves = 0
     var persistedKeys: [String: String] = [:]
     func providerKey(for id: String) -> String { id }
-    func providerAPIKey(for id: String) -> String { providerAPIKeys[id] ?? "" }
-    func updateProviderAPIKey(_ value: String, for id: String) { providerAPIKeys[id] = value }
+    func providerAPIKey(for id: String) -> String { self.providerAPIKeys[id] ?? "" }
+    func updateProviderAPIKey(_ value: String, for id: String) { self.providerAPIKeys[id] = value }
     func saveProviderAPIKeys(invalidating id: String) -> Bool {
-        keySaves += 1
-        guard !failKeychain else { return false }
-        persistedKeys = providerAPIKeys
+        self.keySaves += 1
+        guard !self.failKeychain else { return false }
+        self.persistedKeys = self.providerAPIKeys
         return true
     }
-    func hasProviderAPIKeyDraft(for id: String) -> Bool { providerAPIKeys[id] != nil }
+
+    func hasProviderAPIKeyDraft(for id: String) -> Bool { self.providerAPIKeys[id] != nil }
     func refreshProviderItems() {
-        let items = [ProviderItemData(id: "openai", name: "OpenAI", isBuiltIn: true),
-                     ProviderItemData(id: "ollama", name: "Ollama", isBuiltIn: true),
-                     ProviderItemData(id: "fluid", name: "Fluid", isBuiltIn: true)]
-            + savedProviders.map { ProviderItemData(id: $0.id, name: $0.name, isBuiltIn: false) }
-        cachedAddedProviderItems = addedProviderItems(from: items)
+        let items = [
+            ProviderItemData(id: "openai", name: "OpenAI", isBuiltIn: true),
+            ProviderItemData(id: "ollama", name: "Ollama", isBuiltIn: true),
+            ProviderItemData(id: "fluid", name: "Fluid", isBuiltIn: true),
+        ]
+            + self.savedProviders.map { ProviderItemData(id: $0.id, name: $0.name, isBuiltIn: false) }
+        self.cachedAddedProviderItems = addedProviderItems(from: items)
     }
-    func saveSavedProviders() { saves += 1; refreshProviderItems() }
+
+    func saveSavedProviders() { self.saves += 1; self.refreshProviderItems() }
     func clearEditProviderDraft() {}
-    func finishConfiguringProvider() { selectedProviderID = settings.selectedProviderID }
+    func finishConfiguringProvider() { self.selectedProviderID = self.settings.selectedProviderID }
     func refreshVerifiedProviders() {}
     func selectSoleVerifiedProviderIfNeeded() {}
 }
@@ -96,8 +107,70 @@ final class AIEnhancementSettingsViewModel {
         let vm = AIEnhancementSettingsViewModel()
         vm.refreshProviderItems()
         check(vm.cachedAddedProviderItems.isEmpty, "Fresh catalog stays hidden")
+        let connectionEdits: [(inout ProviderSetupDraft) -> Void] = [
+            { $0.providerID = "ollama" },
+            { $0.baseURL = "http://localhost:4321/v1" },
+            { $0.apiKey = "replacement-key" },
+        ]
+        for edit in connectionEdits {
+            var fetched = ProviderSetupDraft(name: "Server", baseURL: "http://localhost:1234/v1")
+            let oldIdentity = fetched.connectionIdentity
+            check(fetched.applyFetchedModels(["second", "first", "first"], for: oldIdentity), "Current discovery is accepted")
+            check(fetched.model == "first", "Discovery selects its first sorted result")
+            fetched.selectFetchedModel("second")
+            edit(&fetched)
+            check(fetched.model.isEmpty && fetched.fetchedModels.isEmpty, "Connection edits clear automatic and picker selections immediately")
+            check(fetched.modelsToSave(defaults: []).isEmpty, "Saving a new custom connection cannot retain an old fetched model")
+            check(!fetched.applyFetchedModels(["stale"], for: oldIdentity), "Late discovery from the old connection is rejected")
+            check(fetched.model.isEmpty && fetched.fetchedModels.isEmpty, "Rejected discovery cannot repopulate the cleared selection")
+
+            var manual = ProviderSetupDraft(name: "Server", baseURL: "http://localhost:1234/v1")
+            manual.applyFetchedModels(["first"], for: manual.connectionIdentity)
+            // Typing even the same ID explicitly makes it a manual choice.
+            manual.model = "first"
+            edit(&manual)
+            check(manual.model == "first" && manual.fetchedModels.isEmpty, "Connection edits preserve an explicitly entered ID")
+            check(manual.modelsToSave(defaults: []) == ["first"], "Manual IDs remain available to save")
+            manual.applyFetchedModels([], for: manual.connectionIdentity)
+            check(manual.model == "first", "Empty discovery must not erase manual entry")
+        }
+        var reloaded = ProviderSetupDraft(name: "Server", baseURL: "http://localhost:1234/v1")
+        reloaded.applyFetchedModels(["first", "second"], for: reloaded.connectionIdentity)
+        reloaded.selectFetchedModel("second")
+        reloaded.name = "Renamed server"
+        reloaded.baseURL = " http://localhost:1234/v1 "
+        check(reloaded.model == "second", "Name and URL whitespace edits preserve a valid fetched choice")
+        reloaded.applyFetchedModels(["second", "third"], for: reloaded.connectionIdentity)
+        check(reloaded.model == "second", "Reload preserves a selection still returned by the server")
+        reloaded.applyFetchedModels(["third"], for: reloaded.connectionIdentity)
+        check(reloaded.model == "third", "Reload replaces a fetched selection the server no longer returns")
+        reloaded.applyFetchedModels([], for: reloaded.connectionIdentity)
+        check(reloaded.model.isEmpty, "Empty discovery clears an old fetched selection")
+        reloaded.applyFetchedModels(["old-server-model"], for: reloaded.connectionIdentity)
+        reloaded.baseURL = "http://localhost:4321/v1"
+        reloaded.apiKey = "new-key"
+        let freshVM = AIEnhancementSettingsViewModel()
+        check(freshVM.addProvider(reloaded), "A custom provider can be saved after rapid connection edits")
+        check(freshVM.savedProviders.first?.models == [], "Persistence receives no model from the previous connection")
+        check(freshVM.settings.selectedProviderID == "fluid", "Saving the new connection leaves the current dictation route intact")
         var draft = ProviderSetupDraft(name: "Local", baseURL: "http://localhost:1234/v1", model: "tiny")
         check(draft.isValid && vm.saves == 0, "Editing a valid draft has no persistence effects")
+        var discoveryDraft = draft
+        discoveryDraft.fetchedModels = ["first", "second"]
+        discoveryDraft.model = "second"
+        check(discoveryDraft.modelsToSave(defaults: []) == ["second", "first"], "Selected discovered model is saved first without dropping other models")
+        discoveryDraft.model = "manual"
+        check(discoveryDraft.modelsToSave(defaults: []) == ["manual", "first", "second"], "Manual entry preserves discovered models")
+        discoveryDraft.model = ""
+        check(discoveryDraft.modelsToSave(defaults: ["default"]) == ["first", "second"], "Discovery replaces fallback defaults")
+        discoveryDraft.fetchedModels = []
+        check(discoveryDraft.modelsToSave(defaults: ["default"]) == ["default"], "Empty discovery preserves default fallback")
+        let originalConnection = discoveryDraft.connectionIdentity
+        discoveryDraft.model = "another"
+        check(discoveryDraft.connectionIdentity == originalConnection, "Model selection does not invalidate a connection request")
+        discoveryDraft.apiKey = "changed"
+        check(discoveryDraft.connectionIdentity != originalConnection, "Credential edits invalidate stale discovery")
+        check(vm.saves == 0 && vm.providerAPIKeys.isEmpty && vm.savedProviders.isEmpty, "Model discovery drafts do not persist credentials or providers")
         draft.baseURL = "file:///tmp/model"
         check(!draft.isValid && !vm.addProvider(draft), "Reject non-HTTP endpoints without persistence")
         draft.baseURL = "https://user:secret@example.com"
@@ -105,10 +178,14 @@ final class AIEnhancementSettingsViewModel {
         draft.baseURL = "http://localhost:1234/v1"
         draft.apiKey = "test-key"
         vm.failKeychain = true
-        check(!vm.addProvider(draft) && vm.savedProviders.isEmpty && vm.providerAPIKeys.isEmpty && vm.saves == 0,
-              "Keychain failure keeps records, keys, and model maps unchanged")
+        check(
+            !vm.addProvider(draft) && vm.savedProviders.isEmpty && vm.providerAPIKeys.isEmpty && vm.saves == 0,
+            "Keychain failure keeps records, keys, and model maps unchanged"
+        )
         vm.failKeychain = false
+        draft.fetchedModels = ["other", "tiny"]
         check(vm.addProvider(draft) && vm.savedProviders.count == 1, "Explicit Add saves a custom provider")
+        check(vm.savedProviders.first?.models == ["tiny", "other"], "Add persists the selected model and complete discovered list")
         check(vm.settings.selectedProviderID == "fluid" && vm.selectedModelByProvider["fluid"] == "mini", "Adding does not change current route/model")
         check(vm.addProvider(draft) && vm.savedProviders.count == 2, "Same display name cannot overwrite another provider")
         check(vm.cachedAddedProviderItems.count == 2, "Saved custom providers appear without verification")
@@ -134,8 +211,10 @@ final class AIEnhancementSettingsViewModel {
         check(source.contains("if isCustom || managementLayout"), "Built-in management exposes removal")
         let makeDefault = source.components(separatedBy: "private func makePrimaryDefaultProvider")[1]
             .components(separatedBy: "private func modelBinding")[0]
-        check(makeDefault.contains("saveManagedProviderAPIKeyIfNeeded") && !makeDefault.contains("saveProviderAPIKeys"),
-              "Making a provider default only persists an active credential edit")
+        check(
+            makeDefault.contains("saveManagedProviderAPIKeyIfNeeded") && !makeDefault.contains("saveProviderAPIKeys"),
+            "Making a provider default only persists an active credential edit"
+        )
         let removal = AIEnhancementSettingsViewModel()
         removal.providerAPIKeys = ["openai": "remove-key", "other": "keep-key"]
         removal.settings.dictationPromptConfigurations = [
@@ -172,7 +251,10 @@ final class AIEnhancementSettingsViewModel {
         removal.settings.selectedProviderID = "ollama"
         let keySavesBeforeKeylessRemoval = removal.keySaves
         removal.failKeychain = true
-        check(removal.deleteCurrentProvider() && removal.settings.selectedProviderID.isEmpty && removal.settings.selectedModel == nil, "Removing the default clears its model without selecting another provider")
+        check(
+            removal.deleteCurrentProvider() && removal.settings.selectedProviderID.isEmpty && removal.settings.selectedModel == nil,
+            "Removing the default clears its model without selecting another provider"
+        )
         check(removal.keySaves == keySavesBeforeKeylessRemoval, "Removing a keyless provider does not require a Keychain write")
         removal.selectedProviderID = "fluid"
         check(!removal.deleteCurrentProvider(), "External provider removal cannot remove private AI")
@@ -186,7 +268,10 @@ final class AIEnhancementSettingsViewModel {
         check(!closing.saveManagedProviderBeforeClosing("openai"), "Keychain failure keeps Manage open")
         check(closing.providerAPIKeys["openai"] == "edited-key" && closing.settings.selectedProviderID == "fluid", "Failed close preserves the draft and default")
         closing.failKeychain = false
-        check(closing.saveManagedProviderBeforeClosing("openai") && closing.persistedKeys["openai"] == "edited-key", "Done persists an edited key without verification or model refresh")
+        check(
+            closing.saveManagedProviderBeforeClosing("openai") && closing.persistedKeys["openai"] == "edited-key",
+            "Done persists an edited key without verification or model refresh"
+        )
         let savedCount = closing.keySaves
         closing.selectedProviderID = "fluid"
         check(closing.saveManagedProviderBeforeClosing("openai") && closing.keySaves == savedCount, "Removal cleanup must not save a different selected provider")
@@ -198,8 +283,16 @@ final class AIEnhancementSettingsViewModel {
         check(!closing.saveManagedProviderBeforeClosing("ollama"), "Busy editor cannot dismiss")
         check(manager.contains(".interactiveDismissDisabled()"), "Interactive dismissal cannot bypass failed persistence")
         let historySource = try String(contentsOfFile: "Sources/Fluid/UI/TranscriptionHistoryView.swift", encoding: .utf8)
-        let audioRequest = historySource.components(separatedBy: "private struct AudioAvailabilityRequest")[1]
-            .components(separatedBy: "private var filteredEntries")[0]
+        // Inspect only the request type and its inputs. Unrelated properties may
+        // legitimately sit between these declarations and the filtered list.
+        func declaration(_ marker: String) -> String {
+            guard let start = historySource.range(of: marker),
+                  let end = historySource.range(of: "\n    }", range: start.upperBound..<historySource.endIndex)
+            else { preconditionFailure("Missing history declaration: \(marker)") }
+            return String(historySource[start.lowerBound..<end.upperBound])
+        }
+        let audioRequest = declaration("private struct AudioAvailabilityRequest")
+            + declaration("private var audioAvailabilityRequest:")
         check(!audioRequest.contains("selectedEntry") && !audioRequest.contains("selectedID"), "Row selection cannot restart audio scans")
         print("Passed \(count) provider setup assertions")
     }

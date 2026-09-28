@@ -4,6 +4,13 @@ import Foundation
 nonisolated struct StatsSnapshot: Sendable {
     var totalWords = 0
     var totalTranscriptions = 0
+    var totalCharacters = 0
+    /// Words Fluid Intelligence changed, dropped or added compared with the raw transcript.
+    var fluidFixedWords = 0
+    var hasFluidIntelligenceUse = false
+    /// Words and recording time from entries that carry a real audio length.
+    var timedWords = 0
+    var timedMilliseconds = 0
     var aiProcessedCount = 0
     var longestTranscriptionWords = 0
     var mostWordsInDay = 0
@@ -14,7 +21,15 @@ nonisolated struct StatsSnapshot: Sendable {
     var weekdayBestStreak = 0
     var peakHourFormatted = "N/A"
     var topApps: [String] = []
+    var topAppUsage: [(name: String, sessions: Int)] = []
+    var hourlySessions: [Int] = Array(repeating: 0, count: 24)
     var activity: [(date: Date, words: Int)] = []
+
+    /// Real speaking pace, only once there is at least a minute of measured audio.
+    var talkingWordsPerMinute: Int? {
+        guard self.timedMilliseconds >= 60_000, self.timedWords > 0 else { return nil }
+        return Int((Double(self.timedWords) / (Double(self.timedMilliseconds) / 60_000)).rounded())
+    }
 
     var averageWordsPerTranscription: Int {
         self.totalTranscriptions == 0 ? 0 : self.totalWords / self.totalTranscriptions
@@ -88,15 +103,27 @@ nonisolated struct StatsSnapshot: Sendable {
             appCounts[entry.appName.isEmpty ? "Unknown" : entry.appName, default: 0] += 1
             hours[calendar.component(.hour, from: entry.timestamp)] += 1
             result.totalWords += words
+            result.totalCharacters += entry.processedText.count
+            if let milliseconds = entry.audio?.durationMilliseconds, milliseconds > 0 {
+                result.timedWords += words
+                result.timedMilliseconds += milliseconds
+            }
             result.longestTranscriptionWords = max(result.longestTranscriptionWords, words)
             if entry.wasAIProcessed { result.aiProcessedCount += 1 }
+            if entry.wasAIProcessed, entry.processingModel?.lowercased().hasPrefix("fluid-1") == true {
+                result.hasFluidIntelligenceUse = true
+                result.fluidFixedWords += Self.changedWordCount(raw: entry.rawText, processed: entry.processedText)
+            }
         }
         try Task.checkCancellation()
         result.mostWordsInDay = dayWords.values.max() ?? 0
         result.mostTranscriptionsInDay = dayCounts.values.max() ?? 0
-        result.topApps = appCounts.sorted { $0.value == $1.value ? $0.key < $1.key : $0.value > $1.value }.prefix(5).map(\.key)
+        let rankedApps = appCounts.sorted { $0.value == $1.value ? $0.key < $1.key : $0.value > $1.value }.prefix(5)
+        result.topApps = rankedApps.map(\.key)
+        result.topAppUsage = rankedApps.map { (name: $0.key, sessions: $0.value) }
+        result.hourlySessions = hours
         let today = calendar.startOfDay(for: now)
-        result.activity = (0..<30).reversed().compactMap { offset in
+        result.activity = (0..<180).reversed().compactMap { offset in
             guard let date = calendar.date(byAdding: .day, value: -offset, to: today) else { return nil }
             return (date, dayWords[date, default: 0])
         }
@@ -115,6 +142,29 @@ nonisolated struct StatsSnapshot: Sendable {
             }
         }
         return result
+    }
+
+    /// Order-free word difference: cheap enough for the whole history, and blind to
+    /// punctuation and capitalization so it never overstates what was fixed.
+    static func changedWordCount(raw: String, processed: String) -> Int {
+        func counts(_ text: String) -> [Substring: Int] {
+            var result: [Substring: Int] = [:]
+            for word in text.lowercased().split(whereSeparator: { !($0.isLetter || $0.isNumber || $0 == "'") }) {
+                result[word, default: 0] += 1
+            }
+            return result
+        }
+        let before = counts(raw)
+        let after = counts(processed)
+        var removed = 0
+        var added = 0
+        for (word, count) in before {
+            removed += max(0, count - (after[word] ?? 0))
+        }
+        for (word, count) in after {
+            added += max(0, count - (before[word] ?? 0))
+        }
+        return max(removed, added)
     }
 
     private static func previousDay(_ day: Date, calendar: Calendar, weekdays: Bool) -> Date? {

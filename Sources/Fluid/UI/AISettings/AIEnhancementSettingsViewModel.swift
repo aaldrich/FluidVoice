@@ -116,7 +116,6 @@ final class AIEnhancementSettingsViewModel: ObservableObject {
     @Published var appPromptBindingErrorMessage: String = ""
     @Published var selectedDictationPromptID: String? = nil
     @Published var selectedEditPromptID: String? = nil
-    @Published var sendCustomPromptOnly: Bool = false
     @Published var promptEditorMode: PromptEditorMode? = nil
     @Published var draftPromptName: String = ""
     @Published var draftPromptText: String = ""
@@ -170,7 +169,6 @@ final class AIEnhancementSettingsViewModel: ObservableObject {
         self.appPromptBindings = self.settings.appPromptBindings
         self.selectedDictationPromptID = self.settings.selectedDictationPromptID
         self.selectedEditPromptID = self.settings.selectedEditPromptID
-        self.sendCustomPromptOnly = self.settings.sendCustomPromptOnly
         self.isDictationPromptOff = self.settings.isDictationPromptOff
         self.isEditPromptOff = self.settings.isEditPromptOff
 
@@ -841,7 +839,10 @@ final class AIEnhancementSettingsViewModel: ObservableObject {
             }
             return
         }
-        let usesResponsesAPI = self.shouldVerifyWithResponsesAPI(baseURL: baseURL, model: trimmedModel)
+        let usesResponsesAPI = LLMClient.shouldUseResponsesAPI(
+            baseURL: baseURL.trimmingCharacters(in: .whitespacesAndNewlines),
+            model: trimmedModel
+        )
 
         let verificationIdentity = ProviderModelVerificationStore.identity(
             providerID: providerID, baseURL: baseURL, apiKey: apiKey, model: trimmedModel
@@ -855,25 +856,15 @@ final class AIEnhancementSettingsViewModel: ObservableObject {
         let endpoint = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
         let fullURL: String
 
-        if usesResponsesAPI {
-            if endpoint.contains("/responses") {
-                fullURL = endpoint
-            } else if endpoint.contains("/chat/completions") {
-                fullURL = endpoint.replacingOccurrences(of: "/chat/completions", with: "/responses")
-            } else {
-                fullURL = endpoint + "/responses"
-            }
-        } else if isAnthropic {
+        if isAnthropic && !usesResponsesAPI {
             // Anthropic uses /messages endpoint, not /chat/completions
             if endpoint.contains("/messages") {
                 fullURL = endpoint
             } else {
                 fullURL = endpoint + "/messages"
             }
-        } else if endpoint.contains("/chat/completions") || endpoint.contains("/api/chat") || endpoint.contains("/api/generate") {
-            fullURL = endpoint
         } else {
-            fullURL = endpoint + "/chat/completions"
+            fullURL = LLMClient.endpoint(for: endpoint, useResponsesAPI: usesResponsesAPI)
         }
 
         // Debug logging
@@ -1058,22 +1049,6 @@ final class AIEnhancementSettingsViewModel: ObservableObject {
             return "HTTP \(statusCode): \(responseBody)"
         }
         return "HTTP \(statusCode)"
-    }
-
-    private func shouldVerifyWithResponsesAPI(baseURL: String, model: String) -> Bool {
-        if baseURL.contains("/responses") {
-            return true
-        }
-
-        guard let url = URL(string: baseURL),
-              url.host?.lowercased() == "api.openai.com"
-        else { return false }
-
-        let modelLower = model.lowercased()
-        return modelLower.hasPrefix("gpt-5") ||
-            modelLower.hasPrefix("o1") ||
-            modelLower.hasPrefix("o3") ||
-            modelLower.hasPrefix("o4")
     }
 
     /// Interprets network errors with actionable guidance
@@ -1660,8 +1635,9 @@ final class AIEnhancementSettingsViewModel: ObservableObject {
         return singleLine.count > 120 ? String(singleLine.prefix(120)) + "…" : singleLine
     }
 
-    /// Combine a user-visible body with the hidden base prompt to ensure role/intent is always present.
+    /// Preview uses the same prompt composition as the selected editor mode.
     func combinedDraftPrompt(_ text: String, mode: SettingsStore.PromptMode) -> String {
+        if mode.normalized == .dictate, self.promptEditorMode?.isDefault != true { return text }
         let body = SettingsStore.stripBasePrompt(for: mode, from: text)
         return SettingsStore.combineBasePrompt(for: mode, with: body)
     }
@@ -1752,7 +1728,7 @@ final class AIEnhancementSettingsViewModel: ObservableObject {
         self.draftPromptMode = profile.mode.normalized
         self.draftIncludeContext = (self.draftPromptMode == .edit) ? true : profile.includeContext
         self.draftPromptName = profile.name
-        self.draftPromptText = SettingsStore.stripBasePrompt(for: self.draftPromptMode, from: profile.prompt)
+        self.draftPromptText = SettingsStore.customPromptBody(profile.prompt, mode: self.draftPromptMode)
         self.promptEditorSessionID = UUID()
         self.promptEditorMode = .edit(promptID: profile.id)
     }
@@ -1785,7 +1761,7 @@ final class AIEnhancementSettingsViewModel: ObservableObject {
         }
 
         let name = self.draftPromptName.trimmingCharacters(in: .whitespacesAndNewlines)
-        let promptBody = SettingsStore.stripBasePrompt(for: self.draftPromptMode, from: self.draftPromptText)
+        let promptBody = SettingsStore.customPromptBody(self.draftPromptText, mode: self.draftPromptMode)
         let includeContext = (self.draftPromptMode.normalized == .edit) ? true : self.draftIncludeContext
 
         var profiles = self.settings.dictationPromptProfiles
@@ -1798,6 +1774,7 @@ final class AIEnhancementSettingsViewModel: ObservableObject {
             var updated = profiles[idx]
             updated.name = name
             updated.prompt = promptBody
+            updated.usesLegacyEmptyPromptFallback = false
             updated.mode = self.draftPromptMode.normalized
             updated.includeContext = includeContext
             updated.updatedAt = now
@@ -1964,7 +1941,7 @@ final class AIEnhancementSettingsViewModel: ObservableObject {
                       $0.mode.normalized == mode.normalized
               })
         else {
-            return "Built-in Default"
+            return mode.normalized == .dictate ? SettingsStore.DictationModeLabels.externalDefault : "Built-in Default"
         }
 
         let trimmed = profile.name.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1981,11 +1958,6 @@ final class AIEnhancementSettingsViewModel: ObservableObject {
         self.selectedEditPromptID = self.settings.selectedEditPromptID
         self.isDictationPromptOff = self.settings.isDictationPromptOff
         self.isEditPromptOff = self.settings.isEditPromptOff
-    }
-
-    func setSendCustomPromptOnly(_ sendOnly: Bool) {
-        self.settings.sendCustomPromptOnly = sendOnly
-        self.sendCustomPromptOnly = self.settings.sendCustomPromptOnly
     }
 
     func isPrimaryDictationPromptSelectionOff() -> Bool {
@@ -2070,6 +2042,12 @@ final class AIEnhancementSettingsViewModel: ObservableObject {
     func selectPrivateAIPromptIfAvailable() {
         guard self.isPrivateAIPromptAvailable() else { return }
         self.settings.setDictationPromptSelection(.privateAI)
+        // "Only in listed apps" with an empty list would silently keep every app on Basic.
+        if self.settings.promptRoutingScope(for: .dictate) == .selectedAppsOnly,
+           self.settings.appPromptBindings(for: .dictate).isEmpty
+        {
+            self.settings.setPromptRoutingScope(.allApps, for: .dictate)
+        }
         self.refreshPromptSelectionState()
     }
 
@@ -2078,6 +2056,25 @@ final class AIEnhancementSettingsViewModel: ObservableObject {
     /// a user's deliberate "off" or "default" choice.
     private func syncPromptSelectionForSelectedProvider() {
         // Intentionally empty. Selection is sticky.
+    }
+
+    /// True while any dictation shortcut still routes through Fluid Intelligence, even when
+    /// the runtime has been freed by the idle unloader.
+    var routesDictationThroughPrivateAI: Bool {
+        SettingsStore.DictationShortcutSlot.allCases.contains { slot in
+            DictationProviderRoute.resolve(settings: self.settings, dictationSlot: slot).usesPrivateAI
+        }
+    }
+
+    /// Turns off every dictation shortcut currently routed through Fluid Intelligence.
+    /// Slots bound to a cloud provider keep their own selection.
+    func turnOffPrivateAIDictationSlots() {
+        for slot in SettingsStore.DictationShortcutSlot.allCases
+            where DictationProviderRoute.resolve(settings: self.settings, dictationSlot: slot).usesPrivateAI
+        {
+            self.settings.setDictationPromptSelection(.off, for: slot)
+        }
+        self.refreshPromptSelectionState()
     }
 
     func selectPrimaryDictationPromptOff() {
@@ -2093,7 +2090,6 @@ final class AIEnhancementSettingsViewModel: ObservableObject {
     private func refreshPromptSelectionState() {
         self.selectedDictationPromptID = self.settings.selectedDictationPromptID
         self.selectedEditPromptID = self.settings.selectedEditPromptID
-        self.sendCustomPromptOnly = self.settings.sendCustomPromptOnly
         self.isDictationPromptOff = self.settings.isDictationPromptOff
         self.isEditPromptOff = self.settings.isEditPromptOff
     }

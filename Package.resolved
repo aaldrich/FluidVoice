@@ -32,8 +32,7 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/altic-dev/FluidAudio.git",
       "state" : {
-        "branch" : "main",
-        "revision" : "3fd63887eef1dc25edea8263ce4b44aa854d898b"
+        "revision" : "09c23cce76126920b3ff6710cdb154bdf9c126b8"
       }
     },
     {
@@ -169,6 +168,15 @@
       "state" : {
         "revision" : "8b4a38dc994a110abaec8a400615567bd996105f",
         "version" : "0.12.0"
+      }
+    },
+    {
+      "identity" : "zeppelin-embed",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/zepdb/zeppelin-embed.git",
+      "state" : {
+        "revision" : "69b488e3a697ae22ebe2115c69ce2989b505dfe2",
+        "version" : "0.4.1"
       }
     }
   ],

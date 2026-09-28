@@ -772,7 +772,7 @@ final class DirectAudioReliabilityTests: XCTestCase {
         XCTAssertFalse(callbackSection.contains("Task {"))
     }
 
-    func testNormalOutputDismissesOverlayInPasteDispatchTurn() throws {
+    func testNormalOutputHandlesOverlayAfterAwaitingPasteDispatch() throws {
         let repositoryRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
@@ -787,17 +787,13 @@ final class DirectAudioReliabilityTests: XCTestCase {
                 .components(separatedBy: "if spokenSendRequested, !spokenSendAllowed").first
         )
         let pasteIndex = try XCTUnwrap(normalOutputSection.range(of: "typeOutputPlanToActiveField("))
-        let deliveryCompletionIndex = try XCTUnwrap(normalOutputSection.range(of: "completion: { outcome in"))
+        let dispatchResultIndex = try XCTUnwrap(normalOutputSection.range(of: "didTypeExternally = deliveryResult.wasDispatched"))
         let deliveryHandlerIndex = try XCTUnwrap(normalOutputSection.range(of: "self.handleTypingDelivery("))
 
-        XCTAssertLessThan(pasteIndex.lowerBound, deliveryCompletionIndex.lowerBound)
-        XCTAssertLessThan(deliveryCompletionIndex.lowerBound, deliveryHandlerIndex.lowerBound)
-        let hideIndex = try XCTUnwrap(normalOutputSection.range(of: "self.hideOverlayForDispatchedPaste("))
-        XCTAssertLessThan(deliveryHandlerIndex.lowerBound, hideIndex.lowerBound)
-        let dispatchHideSection = try XCTUnwrap(source.components(separatedBy: "private func hideOverlayForDispatchedPaste(").last?.components(separatedBy: "private func handleTypingDelivery(").first)
-        XCTAssertTrue(dispatchHideSection.contains("reason=paste_dispatched"))
-        XCTAssertTrue(dispatchHideSection.contains("self.overlayLifecycleID == lifecycleID"))
-        XCTAssertFalse(dispatchHideSection.contains("Task {"))
+        XCTAssertLessThan(pasteIndex.lowerBound, dispatchResultIndex.lowerBound)
+        XCTAssertLessThan(dispatchResultIndex.lowerBound, deliveryHandlerIndex.lowerBound)
+        XCTAssertTrue(normalOutputSection.contains("deliveryResult = await self.asr.typeOutputPlanToActiveField("))
+        XCTAssertTrue(normalOutputSection.contains("deliveryResult.wasDispatched ? .inserted : .insertionFailed"))
         XCTAssertFalse(normalOutputSection.contains("Task { @MainActor in"))
         XCTAssertFalse(
             normalOutputSection[pasteIndex.lowerBound..<deliveryHandlerIndex.lowerBound]
@@ -809,8 +805,8 @@ final class DirectAudioReliabilityTests: XCTestCase {
                 .components(separatedBy: "private func hideOverlayAfterOutput()").first
         )
         XCTAssertTrue(deliveryHandlerSection.contains("self.overlayLifecycleID == expectedOverlayLifecycleID"))
-        XCTAssertTrue(normalOutputSection.contains("shouldHideOverlay: shouldHideOverlayAfterDelivery && spokenSendRequested"))
-        XCTAssertTrue(normalOutputSection.contains("shouldHide: shouldHideOverlayAfterDelivery && !spokenSendRequested"))
+        XCTAssertTrue(normalOutputSection
+            .contains("shouldHideOverlay: deliveryResult.wasDispatched && !shouldShowAIProcessingFailure && !stopOverlay.didRequestHide && !spokenSendRequested"))
         XCTAssertTrue(deliveryHandlerSection.contains("guard shouldHideOverlay else { return }"))
         XCTAssertFalse(deliveryHandlerSection.contains("await self.menuBarManager.beginProcessingCompletionAndHideOverlay"))
 
@@ -823,8 +819,20 @@ final class DirectAudioReliabilityTests: XCTestCase {
             menuBarSource.components(separatedBy: "func beginProcessingCompletionAndHideOverlay() {").last?
                 .components(separatedBy: "func finishProcessingAndHideOverlay() async {").first
         )
-        XCTAssertTrue(completionSection.contains("NotchOverlayManager.shared.hideImmediately()"))
-        XCTAssertFalse(completionSection.contains("NotchOverlayManager.shared.hide()"))
+        // Completion routes through hide(), which must fall back to an immediate
+        // hide unless the opt-in closing animation is enabled.
+        XCTAssertTrue(completionSection.contains("NotchOverlayManager.shared.hide()"))
+        let notchManagerSource = try String(
+            contentsOf: repositoryRoot
+                .appendingPathComponent("Sources/Fluid/Services/NotchOverlayManager.swift"),
+            encoding: .utf8
+        )
+        let hideSection = try XCTUnwrap(
+            notchManagerSource.components(separatedBy: "func hide() {").last?
+                .components(separatedBy: "func hideImmediately() {").first
+        )
+        XCTAssertTrue(hideSection.contains("guard SettingsStore.shared.overlayClosingAnimationEnabled else {"))
+        XCTAssertTrue(hideSection.contains("self.hideImmediately()"))
 
         let postStopSection = try XCTUnwrap(
             source.components(separatedBy: "let transcribedText = await asr.stop").last?
@@ -876,9 +884,17 @@ final class DirectAudioReliabilityTests: XCTestCase {
             contentsOf: repositoryRoot.appendingPathComponent("Sources/Fluid/ContentView.swift"),
             encoding: .utf8
         )
-        XCTAssertTrue(source.contains(
-            "await self.processDictationPromptTest(transcribedText, lifecycleID: expectedOverlayLifecycleID)"
+        // Formatting may wrap this call; the same arguments and lifecycle binding must remain.
+        let compactSource = source.filter { !$0.isWhitespace }
+        XCTAssertTrue(compactSource.contains(
+            "awaitself.routePromptTestResult(transcribedText,sessionID:promptTestSessionID,lifecycleID:expectedOverlayLifecycleID)"
         ))
+        let routingSection = try XCTUnwrap(
+            source.components(separatedBy: "private func routePromptTestResult(").last?
+                .components(separatedBy: "private func makeAIProcessingFeedback(").first
+        )
+        XCTAssertTrue(routingSection.contains("await self.processDictationPromptTest(text, lifecycleID: lifecycleID)"))
+        XCTAssertTrue(routingSection.contains("acceptsResult(for: sessionID)"))
         let promptTestSection = try XCTUnwrap(
             source.components(separatedBy: "private func processDictationPromptTest(").last?
                 .components(separatedBy: "private func makeAIProcessingFeedback(").first
@@ -916,16 +932,16 @@ final class DirectAudioReliabilityTests: XCTestCase {
             encoding: .utf8
         )
         let completionSection = try XCTUnwrap(
-            source.components(separatedBy: "let completedOutcome = outcome").last?
-                .components(separatedBy: "self.log(\"[TypingService] Starting async text insertion process\")").first
+            source.components(separatedBy: "guard let postInsertionKey else {").last?
+                .components(separatedBy: "guard let preferredTargetPID").first
         )
-        let callbackIndex = try XCTUnwrap(completionSection.range(of: "completion?(completedOutcome)"))
+        let callbackIndex = try XCTUnwrap(completionSection.range(of: "completion?(outcome)"))
         let trackingIndex = try XCTUnwrap(
             completionSection.range(of: "AutomaticDictionaryCorrectionTracker.shared.beginObservingInsertion")
         )
 
         XCTAssertLessThan(callbackIndex.lowerBound, trackingIndex.lowerBound)
-        XCTAssertTrue(completionSection.contains("completedOutcome.didInsert"))
+        XCTAssertTrue(completionSection.contains("tracksDictionaryCorrections, outcome.didInsert"))
         XCTAssertTrue(completionSection.contains("dictionary_tracking_scheduled afterDeliveryCallback=true"))
     }
 

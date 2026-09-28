@@ -11,7 +11,6 @@ struct TranscriptionHistoryView: View {
     @State private var showClearConfirmation: Bool = false
     @State private var showReportConfirmation: Bool = false
     @State private var selectedReportEntry: TranscriptionHistoryEntry?
-    @State private var selectedEntryID: UUID?
     @State private var audioEntryID: UUID?
     @State private var copiedEntryID: UUID?
     @State private var copyFeedbackTask: Task<Void, Never>?
@@ -30,6 +29,13 @@ struct TranscriptionHistoryView: View {
         )
     }
 
+    /// Lives in the store so the sidebar search can select a row before this view
+    /// exists, and the store's delete and clear paths keep it valid.
+    private var selectedEntryID: UUID? {
+        get { self.historyStore.selectedEntryID }
+        nonmutating set { self.historyStore.selectedEntryID = newValue }
+    }
+
     private var filteredEntries: [TranscriptionHistoryEntry] {
         self.historyStore.search(query: self.searchQuery)
     }
@@ -44,14 +50,6 @@ struct TranscriptionHistoryView: View {
             // MARK: - Left Panel: Entry List
 
             VStack(spacing: 0) {
-                HStack(spacing: 10) {
-                    Image(systemName: "clock.arrow.circlepath").foregroundStyle(self.theme.palette.accent)
-                    Text("History").font(self.theme.typography.sectionTitle)
-                    Spacer()
-                }
-                .padding(.horizontal, 18)
-                .padding(.top, 20)
-                .padding(.bottom, 8)
                 self.searchBar
                     .padding(12)
 
@@ -61,7 +59,7 @@ struct TranscriptionHistoryView: View {
                 } else if let error = self.historyStore.persistenceError {
                     VStack(alignment: .leading, spacing: 8) {
                         Text(error)
-                            .font(.caption)
+                            .font(.fluidSystem(.caption))
                         Button("Retry saving history") {
                             self.historyStore.retryPersistence()
                         }
@@ -83,7 +81,7 @@ struct TranscriptionHistoryView: View {
                 self.footerView
                     .disabled(self.historyStore.isLoading)
             }
-            .frame(minWidth: 280, idealWidth: 340, maxWidth: 400)
+            .frame(minWidth: 280, idealWidth: 408, maxWidth: 480)
             .background(self.theme.palette.contentBackground)
 
             // MARK: - Right Panel: Entry Detail
@@ -155,19 +153,19 @@ struct TranscriptionHistoryView: View {
     private var searchBar: some View {
         HStack(spacing: 8) {
             Image(systemName: "magnifyingglass")
-                .font(.system(size: 13, weight: .medium))
+                .font(.fluidSystem(size: 13, weight: .medium))
                 .foregroundStyle(.secondary)
 
             TextField("Search transcriptions...", text: self.$searchQuery)
                 .textFieldStyle(.plain)
-                .font(.system(size: 13))
+                .font(.fluidSystem(size: 13))
 
             if !self.searchQuery.isEmpty {
                 Button {
                     self.searchQuery = ""
                 } label: {
                     Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 12))
+                        .font(.fluidSystem(size: 12))
                         .foregroundStyle(.secondary)
                 }
                 .buttonStyle(.plain)
@@ -184,81 +182,124 @@ struct TranscriptionHistoryView: View {
     // MARK: - Entry List
 
     private var entryListView: some View {
-        ScrollView {
-            LazyVStack(spacing: 6) {
-                ForEach(self.filteredEntries) { entry in
-                    self.entryRow(entry)
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(spacing: 6) {
+                    ForEach(self.filteredEntries) { entry in
+                        self.entryRow(entry)
+                            .id(entry.id)
+                    }
                 }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 6)
             }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 6)
+            .onAppear { self.reveal(self.selectedEntryID, with: proxy) }
+            .onChange(of: self.historyStore.selectedEntryID) { _, id in self.reveal(id, with: proxy) }
         }
+    }
+
+    /// Scrolls to a row chosen elsewhere (the sidebar search). A local filter that
+    /// hides it is cleared first, or the selection would fall back to the first row.
+    private func reveal(_ id: UUID?, with proxy: ScrollViewProxy) {
+        guard let id else { return }
+        if !self.filteredEntries.contains(where: { $0.id == id }) {
+            self.searchQuery = ""
+            DispatchQueue.main.async {
+                proxy.scrollTo(id)
+            }
+            return
+        }
+        proxy.scrollTo(id)
     }
 
     private func entryRow(_ entry: TranscriptionHistoryEntry) -> some View {
         let isSelected = self.selectedEntryID == entry.id
-        return HStack(alignment: .top, spacing: 8) {
-            Button {
-                self.selectedEntryID = entry.id
-            } label: {
-                VStack(alignment: .leading, spacing: 7) {
-                    HStack(spacing: 8) {
-                        HistoryAppIcon(appName: entry.appName)
-                        Spacer(minLength: 4)
-                        Text(entry.relativeTimeString)
-                            .font(self.theme.typography.caption).foregroundStyle(.secondary)
-                    }
-                    Text(entry.previewText)
-                        .font(self.theme.typography.body)
-                        .lineLimit(2).multilineTextAlignment(.leading)
-                    HStack(spacing: 10) {
-                        if let model = self.recordedModel(entry) {
-                            Label(model, systemImage: "sparkles")
-                                .lineLimit(1).truncationMode(.middle)
-                                .help("Recorded AI model: \(model)")
-                        } else if entry.wasAIProcessed {
-                            Label("AI enhanced", systemImage: "sparkles")
-                        }
-                        if self.hasAudio(entry) {
-                            Image(systemName: "waveform").accessibilityLabel("Saved audio")
-                        }
-                        if entry.aiProcessingError != nil {
-                            Image(systemName: "exclamationmark.triangle")
-                                .foregroundStyle(.orange).help(entry.aiProcessingError ?? "")
-                        }
-                        Spacer(minLength: 0)
-                        if self.settings.showHistoryPerformanceMetrics, let speed = entry.aiTokensPerSecond {
-                            Text(TranscriptionHistoryEntry.formattedTokensPerSecond(speed, compact: true))
-                                .font(self.theme.typography.captionStrong)
-                                .foregroundStyle(self.theme.palette.accent)
-                                .monospacedDigit()
-                                .fixedSize()
-                                .help("AI generation speed, in tokens per second—not total processing time")
-                        }
-                    }
-                    .font(self.theme.typography.caption).foregroundStyle(.secondary)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityAddTraits(isSelected ? .isSelected : [])
-            VStack(spacing: 10) {
+        return HistoryHoverRow(isSelected: isSelected) { showsActions in
+            ZStack(alignment: .bottomTrailing) {
                 Button {
-                    self.copyFinalText(entry)
+                    self.selectedEntryID = entry.id
                 } label: {
-                    Image(systemName: self.copiedEntryID == entry.id ? "checkmark" : "doc.on.doc")
+                    VStack(alignment: .leading, spacing: 7) {
+                        HStack(spacing: 8) {
+                            HistoryAppIcon(appName: entry.appName)
+                            Spacer(minLength: 4)
+                            Text(entry.relativeTimeString)
+                                .font(self.theme.typography.caption).foregroundStyle(.secondary)
+                        }
+                        Text(entry.previewText)
+                            .font(self.theme.typography.body)
+                            .lineLimit(2).multilineTextAlignment(.leading)
+                        HStack(spacing: 10) {
+                            if let model = self.recordedModel(entry) {
+                                Label(model, systemImage: "sparkles")
+                                    .lineLimit(1).truncationMode(.middle)
+                                    .help("Recorded AI model: \(model)")
+                            } else if entry.wasAIProcessed {
+                                Label("AI enhanced", systemImage: "sparkles")
+                            }
+                            if self.hasAudio(entry) {
+                                Image(systemName: "waveform").accessibilityLabel("Saved audio")
+                            }
+                            if entry.aiProcessingError != nil {
+                                Image(systemName: "exclamationmark.triangle")
+                                    .foregroundStyle(.orange).help(entry.aiProcessingError ?? "")
+                            }
+                            Spacer(minLength: 0)
+                            if self.settings.showHistoryPerformanceMetrics, let speed = entry.aiTokensPerSecond {
+                                Text(TranscriptionHistoryEntry.formattedTokensPerSecond(speed, compact: true))
+                                    .font(self.theme.typography.captionStrong)
+                                    .foregroundStyle(self.theme.palette.accent)
+                                    .monospacedDigit()
+                                    .fixedSize()
+                                    .help("AI generation speed, in tokens per second—not total processing time")
+                            }
+                        }
+                        .font(self.theme.typography.caption).foregroundStyle(.secondary)
+                        .padding(.trailing, 76)
+                        .frame(minHeight: 28)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .help("Copy final text")
-                .accessibilityLabel(self.copiedEntryID == entry.id ? "Copied" : "Copy final text")
-                Menu { self.entryActions(entry) } label: {
-                    Image(systemName: "ellipsis")
+                .simultaneousGesture(TapGesture(count: 2).onEnded {
+                    self.selectedEntryID = entry.id
+                    self.copyFinalText(entry)
+                })
+                .help("Double-click to copy final text")
+                .accessibilityAddTraits(isSelected ? .isSelected : [])
+                .accessibilityAction(named: Text("Copy final text")) { self.copyFinalText(entry) }
+                .accessibilityAction(named: Text("Report issue")) { self.openFeedbackReport(for: entry) }
+                HStack(spacing: 8) {
+                    Button {
+                        self.copyFinalText(entry)
+                    } label: {
+                        Image(systemName: self.copiedEntryID == entry.id ? "checkmark" : "doc.on.doc")
+                            .frame(width: 28, height: 28)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("Copy final text")
+                    .accessibilityLabel(self.copiedEntryID == entry.id ? "Copied" : "Copy final text")
+                    Button {
+                        self.openFeedbackReport(for: entry)
+                    } label: {
+                        Image(systemName: "flag")
+                            .frame(width: 28, height: 28)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("Report an issue with this dictation")
+                    .accessibilityLabel("Report issue")
                 }
-                .menuStyle(.borderlessButton).menuIndicator(.hidden)
-                .fixedSize().accessibilityLabel("Dictation actions")
+                .font(self.theme.typography.body)
+                .labelStyle(.iconOnly)
+                .frame(width: 64)
+                .foregroundStyle(.secondary)
+                .opacity(showsActions ? 1 : 0)
+                .allowsHitTesting(showsActions)
+                .accessibilityHidden(!showsActions)
             }
-            .foregroundStyle(.secondary)
         }
         .padding(12)
         .background(self.theme.palette.accent.opacity(isSelected ? 0.12 : 0), in: RoundedRectangle(cornerRadius: 14))
@@ -310,7 +351,7 @@ struct TranscriptionHistoryView: View {
         Button {
             self.openFeedbackReport(for: entry)
         } label: {
-            Label("Report Bad Result...", systemImage: "hand.thumbsup.slash")
+            Label("Report issue...", systemImage: "flag")
         }
 
         Divider()
@@ -333,18 +374,18 @@ struct TranscriptionHistoryView: View {
             Spacer()
 
             Image(systemName: self.searchQuery.isEmpty ? "clock.arrow.circlepath" : "magnifyingglass")
-                .font(.system(size: 36, weight: .light))
+                .font(.fluidSystem(size: 36, weight: .light))
                 .foregroundStyle(.tertiary)
 
             VStack(spacing: 4) {
                 Text(self.searchQuery.isEmpty ? "No History Yet" : "No Results")
-                    .font(.system(size: 14, weight: .semibold))
+                    .font(.fluidSystem(size: 14, weight: .semibold))
                     .foregroundStyle(.secondary)
 
                 Text(self.searchQuery.isEmpty
                     ? "Your transcriptions will appear here"
                     : "Try a different search term")
-                    .font(.system(size: 12))
+                    .font(.fluidSystem(size: 12))
                     .foregroundStyle(.tertiary)
                     .multilineTextAlignment(.center)
             }
@@ -365,7 +406,7 @@ struct TranscriptionHistoryView: View {
             HStack {
                 // Stats
                 Text("\(self.historyStore.entries.count) entries")
-                    .font(.system(size: 11, weight: .medium))
+                    .font(.fluidSystem(size: 11, weight: .medium))
                     .foregroundStyle(.tertiary)
 
                 Spacer()
@@ -376,7 +417,7 @@ struct TranscriptionHistoryView: View {
                         self.showClearConfirmation = true
                     } label: {
                         Text("Clear All")
-                            .font(.system(size: 11, weight: .medium))
+                            .font(.fluidSystem(size: 11, weight: .medium))
                             .foregroundStyle(.secondary)
                     }
                     .buttonStyle(.plain)
@@ -423,10 +464,10 @@ struct TranscriptionHistoryView: View {
                 }
                 HistoryTextComparisonView(entry: entry, copy: self.copyToClipboard)
                     .id(entry.id)
-                if self.settings.showHistoryPerformanceMetrics {
-                    FluidManagementGroup(title: "Processing") {
-                        LazyVGrid(columns: self.detailColumns, alignment: .leading, spacing: 16) {
-                            if let duration = entry.transcriptionDurationMilliseconds {
+                FluidManagementGroup(title: "Processing") {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 140), spacing: 16, alignment: .leading)], alignment: .leading, spacing: 16) {
+                        if self.settings.showHistoryPerformanceMetrics {
+                            if let duration = entry.parakeetProcessingDurationMilliseconds ?? entry.transcriptionDurationMilliseconds {
                                 self.metadataItem(
                                     icon: "waveform",
                                     label: "Transcription",
@@ -448,34 +489,22 @@ struct TranscriptionHistoryView: View {
                                 )
                             }
                         }
+                        self.metadataItem(
+                            icon: "sparkles",
+                            label: entry.aiProcessingError == nil ? "AI model" : "AI model (failed)",
+                            value: self.recordedModel(entry) ?? (entry.wasAIProcessed ? "Not recorded" : "No AI cleanup")
+                        )
                     }
                 }
                 FluidManagementGroup(title: "Details") {
                     LazyVGrid(columns: self.detailColumns, alignment: .leading, spacing: 16) {
                         self.metadataItem(icon: "app", label: "Application", value: entry.appName.isEmpty ? "Unknown" : entry.appName)
-                        self.metadataItem(icon: "character.cursor.ibeam", label: "Characters", value: "\(entry.characterCount)")
-                        self.metadataItem(icon: "waveform", label: "Recording", value: self.audioMetadataText(for: entry))
-                    }
-                    Divider().opacity(0.4)
-                    self.metadataItem(
-                        icon: "sparkles",
-                        label: entry.aiProcessingError == nil ? "AI model" : "AI model (failed)",
-                        value: self.recordedModel(entry) ?? (entry.wasAIProcessed ? "Not recorded" : "No AI cleanup")
-                    )
-                }
-                ViewThatFits(in: .horizontal) {
-                    HStack {
-                        self.secondaryActions(entry)
-                        Spacer()
-                    }
-                    VStack(alignment: .leading, spacing: 12) {
-                        self.secondaryActions(entry)
+                        self.metadataItem(icon: "waveform", label: "Recording", value: self.recordingDurationText(for: entry))
+                        self.metadataItem(icon: "internaldrive", label: "Audio size", value: self.audioSizeText(for: entry))
                     }
                 }
             }
-            .padding(24)
-            .frame(maxWidth: 1080, alignment: .leading)
-            .frame(maxWidth: .infinity)
+            .fluidPageContent()
         }
         .background(self.theme.palette.contentBackground)
     }
@@ -483,7 +512,7 @@ struct TranscriptionHistoryView: View {
     private func detailHeading(_ entry: TranscriptionHistoryEntry) -> some View {
         HStack(spacing: 14) {
             Image(systemName: "clock.arrow.circlepath")
-                .font(.system(size: 24, weight: .medium))
+                .font(.fluidSystem(size: 24, weight: .medium))
                 .foregroundStyle(self.theme.palette.accent)
                 .frame(width: 52, height: 52)
                 .background(self.theme.palette.accent.opacity(0.1), in: RoundedRectangle(cornerRadius: 16))
@@ -506,6 +535,10 @@ struct TranscriptionHistoryView: View {
     private func detailActions(_ entry: TranscriptionHistoryEntry) -> some View {
         FluidGlassControlGroup {
             HStack(spacing: 8) {
+                Button { self.openFeedbackReport(for: entry) } label: {
+                    Label("Report issue", systemImage: "flag")
+                }
+                .fluidGlassAction()
                 Button { self.copyFinalText(entry) } label: {
                     Label(
                         self.copiedEntryID == entry.id ? "Copied" : "Copy text",
@@ -530,23 +563,9 @@ struct TranscriptionHistoryView: View {
         }
     }
 
-    @ViewBuilder
-    private func secondaryActions(_ entry: TranscriptionHistoryEntry) -> some View {
-        if self.hasAudio(entry) {
-            Button { self.exportPair(entry) } label: {
-                Label("Export pair", systemImage: "square.and.arrow.up")
-            }
-            .fluidGlassAction()
-        }
-        Button { self.openFeedbackReport(for: entry) } label: {
-            Label("Report issue", systemImage: "hand.thumbsup.slash")
-        }
-        .fluidGlassAction()
-    }
-
     private func metadataItem(icon: String, label: String, value: String) -> some View {
         HStack(spacing: 12) {
-            Image(systemName: icon).font(.system(size: 18)).foregroundStyle(self.theme.palette.accent)
+            Image(systemName: icon).font(.fluidSystem(size: 18)).foregroundStyle(self.theme.palette.accent)
                 .frame(width: 24)
             VStack(alignment: .leading, spacing: 5) {
                 Text(label).font(self.theme.typography.caption).foregroundStyle(.secondary)
@@ -568,8 +587,10 @@ struct TranscriptionHistoryView: View {
     }
 
     private func copyToClipboard(_ text: String) {
+        ClipboardAudit.record("ui_copy_begin")
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
+        ClipboardAudit.record("ui_copy_end")
     }
 
     private func openFeedbackReport(for entry: TranscriptionHistoryEntry) {
@@ -585,11 +606,15 @@ struct TranscriptionHistoryView: View {
         return self.availableAudioFiles.contains(audio.fileName)
     }
 
-    private func audioMetadataText(for entry: TranscriptionHistoryEntry) -> String {
-        guard let audio = entry.audio, self.hasAudio(entry) else { return "No" }
-        let seconds = Double(audio.durationMilliseconds) / 1000.0
-        let size = ByteCountFormatter.string(fromByteCount: Int64(audio.byteCount), countStyle: .file)
-        return "\(String(format: "%.1f", seconds))s, \(size)"
+    private func recordingDurationText(for entry: TranscriptionHistoryEntry) -> String {
+        guard let audio = entry.audio else { return "Not saved" }
+        return String(format: "%.1fs", Double(audio.durationMilliseconds) / 1000.0)
+    }
+
+    private func audioSizeText(for entry: TranscriptionHistoryEntry) -> String {
+        guard let audio = entry.audio else { return "Not saved" }
+        guard self.hasAudio(entry) else { return "Unavailable" }
+        return ByteCountFormatter.string(fromByteCount: Int64(audio.byteCount), countStyle: .file)
     }
 
     private func revealAudio(_ entry: TranscriptionHistoryEntry) {
@@ -626,11 +651,11 @@ struct TranscriptionHistoryView: View {
     private var noSelectionView: some View {
         VStack(spacing: 16) {
             Image(systemName: "text.quote")
-                .font(.system(size: 40, weight: .light))
+                .font(.fluidSystem(size: 40, weight: .light))
                 .foregroundStyle(.tertiary)
 
             Text("Select a transcription")
-                .font(.system(size: 14, weight: .medium))
+                .font(.fluidSystem(size: 14, weight: .medium))
                 .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -663,9 +688,9 @@ private struct TranscriptionFeedbackReportSheet: View {
         VStack(alignment: .leading, spacing: 16) {
             VStack(alignment: .leading, spacing: 4) {
                 Text("Share anonymous datapoint")
-                    .font(.system(size: 18, weight: .semibold))
+                    .font(.fluidSystem(size: 18, weight: .semibold))
                 Text("Help improve our model. Only the example shown below will be sent.")
-                    .font(.system(size: 12))
+                    .font(.fluidSystem(size: 12))
                     .foregroundStyle(.secondary)
             }
 
@@ -676,7 +701,7 @@ private struct TranscriptionFeedbackReportSheet: View {
 
             if let errorMessage {
                 Text(errorMessage)
-                    .font(.system(size: 12, weight: .medium))
+                    .font(.fluidSystem(size: 12, weight: .medium))
                     .foregroundStyle(.red)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -743,12 +768,12 @@ private struct TranscriptionFeedbackReportSheet: View {
     private func feedbackField(title: String, text: Binding<String>, height: CGFloat) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(title)
-                .font(.system(size: 11, weight: .semibold))
+                .font(.fluidSystem(size: 11, weight: .semibold))
                 .foregroundStyle(.secondary)
                 .textCase(.uppercase)
 
             TextEditor(text: text)
-                .font(.system(size: 13))
+                .font(.fluidSystem(size: 13))
                 .scrollContentBackground(.hidden)
                 .padding(8)
                 .frame(height: height)
@@ -766,6 +791,19 @@ private struct TranscriptionFeedbackReportSheet: View {
     private static func reportModel(for entry: TranscriptionHistoryEntry) -> String {
         let model = entry.processingModel?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return model.isEmpty ? "unknown" : model
+    }
+}
+
+private struct HistoryHoverRow<Content: View>: View {
+    let isSelected: Bool
+    @ViewBuilder let content: (Bool) -> Content
+    @State private var isHovered = false
+    @FocusState private var containsFocus: Bool
+
+    var body: some View {
+        self.content(self.isHovered || self.isSelected || self.containsFocus)
+            .focused(self.$containsFocus)
+            .onHover { self.isHovered = $0 }
     }
 }
 

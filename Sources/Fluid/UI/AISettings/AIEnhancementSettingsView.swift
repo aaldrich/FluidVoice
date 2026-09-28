@@ -38,6 +38,7 @@ struct AIEnhancementSettingsView: View {
     @Binding var shortcutRecordingMessage: String?
     @State var expandedProviderID: String? = nil
     @State var showingAddProviderSheet = false
+    @State var showingPromptProviderSetup = false
     @State var managedExternalProviderID: String?
     @State var showingRemoveProviderConfirmation = false
     @State var providerSearchText: String = ""
@@ -46,6 +47,7 @@ struct AIEnhancementSettingsView: View {
     @State var hoveredPromptModeKey: String? = nil
     @State var hoveredPromptScopeKey: String? = nil
     @State var isPromptProfilesHelpPresented: Bool = false
+    @State var showsAppSpecificStyles = false
     @State var promptEditorPrimarySelectionDraft: SettingsStore.DictationPromptSelection? = nil
     @State var promptEditorShortcutDraft: HotkeyShortcut? = nil
     @State var promptEditorProviderIDDraft: String = ""
@@ -101,44 +103,5 @@ struct AIEnhancementSettingsView: View {
             } message: {
                 Text(self.viewModel.appPromptBindingErrorMessage)
             }
-    }
-
-    var customPromptOnlyToggleRow: some View {
-        HStack(alignment: .center, spacing: 12) {
-            Image(systemName: "text.quote")
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(self.theme.palette.accent)
-                .frame(width: 24, height: 24)
-
-            VStack(alignment: .leading, spacing: 3) {
-                Text("Send Custom Prompt Only")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(self.theme.palette.primaryText)
-                Text("For custom Dictate prompts, send your prompt without prepending the built-in dictation prompt.")
-                    .font(.caption2)
-                    .foregroundStyle(self.theme.palette.secondaryText)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
-            Spacer(minLength: 12)
-
-            Toggle("", isOn: Binding(
-                get: { self.viewModel.sendCustomPromptOnly },
-                set: { self.viewModel.setSendCustomPromptOnly($0) }
-            ))
-            .toggleStyle(.switch)
-            .labelsHidden()
-            .help("Send custom Dictate prompts without prepending the built-in dictation prompt.")
-        }
-        .padding(.horizontal, 13)
-        .padding(.vertical, 10)
-        .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(self.theme.palette.cardBackground.opacity(0.72))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .stroke(self.theme.palette.cardBorder.opacity(0.32), lineWidth: 1)
-                )
-        )
     }
 }

@@ -3,9 +3,146 @@ import Combine
 import CoreAudio
 @testable import FluidVoice_Debug
 import Foundation
+import SwiftUI
 import XCTest
 
 final class HotkeyShortcutTests: XCTestCase {
+    @MainActor
+    func testOverlayAppearanceRejectsNonfiniteTransparency() {
+        let defaults = UserDefaults.standard
+        let key = "OverlayGlassOpacity"
+        let previous = defaults.object(forKey: key)
+        defer {
+            if let previous { defaults.set(previous, forKey: key) } else { defaults.removeObject(forKey: key) }
+        }
+        for invalid in [Double.nan, .infinity, -.infinity] {
+            SettingsStore.shared.overlayGlassOpacity = invalid
+            XCTAssertEqual(SettingsStore.shared.overlayGlassOpacity, SettingsStore.defaultOverlayGlassOpacity)
+        }
+        SettingsStore.shared.overlayGlassOpacity = -1
+        XCTAssertEqual(SettingsStore.shared.overlayGlassOpacity, 0.25)
+        SettingsStore.shared.overlayGlassOpacity = 2
+        XCTAssertEqual(SettingsStore.shared.overlayGlassOpacity, 1)
+    }
+
+    @MainActor
+    func testOverlayAppearanceFitsNarrowSettingsColumn() {
+        let defaults = UserDefaults.standard
+        let keys = ["OverlaySize", "OverlayMaterial"]
+        let previous = keys.map { defaults.object(forKey: $0) }
+        defer {
+            for (key, value) in zip(keys, previous) {
+                if let value { defaults.set(value, forKey: key) } else { defaults.removeObject(forKey: key) }
+            }
+        }
+        // 800-point minimum window minus sidebar, settings insets, and card padding.
+        for width: CGFloat in [420, 520, 900] {
+            for scheme in [ColorScheme.light, .dark] {
+                for overlaySize in SettingsStore.OverlaySize.allCases {
+                    for material in SettingsStore.OverlayMaterial.allCases {
+                        defaults.set(overlaySize.rawValue, forKey: keys[0])
+                        defaults.set(material.rawValue, forKey: keys[1])
+                        let host = NSHostingController(rootView: OverlayAppearanceEditor().environment(\.colorScheme, scheme))
+                        let size = host.sizeThatFits(in: NSSize(width: width, height: 10_000))
+                        XCTAssertLessThanOrEqual(size.width, width + 1, "\(overlaySize) / \(material) at \(width)")
+                        XCTAssertTrue(size.height.isFinite)
+                    }
+                }
+            }
+        }
+    }
+
+    func testExplicitCustomPromptMigrationPreservesRulesAndIdentity() throws {
+        var legacy = SettingsStore.DictationPromptProfile(name: "Brief", prompt: "Keep it short.")
+        legacy.usesExplicitDictationPrompt = false
+        let migrated = SettingsStore.migrateExplicitDictationPrompt(legacy, legacySendOnly: false)
+        XCTAssertEqual(migrated.prompt, SettingsStore.combineBasePrompt(for: .dictate, with: legacy.prompt))
+        XCTAssertEqual(migrated.id, legacy.id)
+        XCTAssertEqual(migrated.updatedAt, legacy.updatedAt)
+        XCTAssertTrue(migrated.usesExplicitDictationPrompt)
+        XCTAssertEqual(SettingsStore.migrateExplicitDictationPrompt(migrated, legacySendOnly: false), migrated)
+        let restored = try JSONDecoder().decode(SettingsStore.DictationPromptProfile.self, from: JSONEncoder().encode(migrated))
+        XCTAssertEqual(SettingsStore.migrateExplicitDictationPrompt(restored, legacySendOnly: false), migrated)
+        XCTAssertEqual(SettingsStore.shared.shortcutOverrideSystemPrompt(for: migrated), migrated.prompt)
+    }
+
+    func testExplicitCustomPromptMigrationHonorsLegacyToggleAndEditMode() {
+        var legacy = SettingsStore.DictationPromptProfile(name: "Brief", prompt: "Keep it short.")
+        legacy.usesExplicitDictationPrompt = false
+        let standalone = SettingsStore.migrateExplicitDictationPrompt(legacy, legacySendOnly: true)
+        XCTAssertEqual(standalone.prompt, legacy.prompt)
+        legacy.mode = .edit
+        XCTAssertEqual(SettingsStore.migrateExplicitDictationPrompt(legacy, legacySendOnly: false), legacy)
+        legacy.mode = .dictate
+        legacy.prompt = ""
+        XCTAssertEqual(SettingsStore.migrateExplicitDictationPrompt(legacy, legacySendOnly: false).prompt, "")
+    }
+
+    func testLegacyEmptyCustomShortcutPreservesBothFallbacks() throws {
+        var legacy = SettingsStore.DictationPromptProfile(name: "Legacy empty", prompt: "")
+        legacy.usesExplicitDictationPrompt = false
+        let withBase = SettingsStore.migrateExplicitDictationPrompt(legacy, legacySendOnly: false)
+        let defaultFallback = SettingsStore.migrateExplicitDictationPrompt(legacy, legacySendOnly: true)
+        XCTAssertEqual(SettingsStore.shared.shortcutOverrideSystemPrompt(for: withBase), SettingsStore.baseDictationPromptText())
+        XCTAssertNil(SettingsStore.shared.shortcutOverrideSystemPrompt(for: defaultFallback))
+        let restored = try JSONDecoder().decode(SettingsStore.DictationPromptProfile.self, from: JSONEncoder().encode(withBase))
+        XCTAssertEqual(SettingsStore.shared.shortcutOverrideSystemPrompt(for: restored), SettingsStore.baseDictationPromptText())
+        XCTAssertTrue(withBase.usesLegacyEmptyPromptFallback)
+        XCTAssertTrue(defaultFallback.usesLegacyEmptyPromptFallback)
+    }
+
+    func testNewCustomPromptsUseWrittenTextWithoutStrippingOrAddingRules() {
+        let written = SettingsStore.baseDictationPromptText() + "\n\nUse lowercase.  "
+        let profile = SettingsStore.DictationPromptProfile(name: "Custom", prompt: written)
+        XCTAssertEqual(SettingsStore.migrateExplicitDictationPrompt(profile, legacySendOnly: false), profile)
+        XCTAssertEqual(SettingsStore.customPromptBody(written, mode: .dictate), written)
+        XCTAssertEqual(SettingsStore.shared.shortcutOverrideSystemPrompt(for: profile), written)
+        XCTAssertEqual(SettingsStore.shared.shortcutOverrideSystemPrompt(for: .init(name: "Blank", prompt: "")), "")
+        XCTAssertTrue(SettingsStore.defaultDictationPromptText().contains(SettingsStore.baseDictationPromptText()))
+    }
+
+    func testInputDeliveryTimingKeepsClocksSeparate() {
+        let input = HotkeyInputTiming(
+            receivedAt: 100, eventTimestamp: 5_000_000_000, eventType: 12, receivedTimestamp: 5_050_000_000
+        )
+        XCTAssertEqual(input.deliveryAgeMs, 50)
+        XCTAssertEqual(input.receivedAt, 100)
+        XCTAssertEqual(input.eventTimestamp, 5_000_000_000)
+        XCTAssertEqual(input.eventType, 12)
+    }
+
+    func testRemovingAllPrimaryShortcutsPreservesExplicitEmptyState() throws {
+        try self.withRestoredDefaults(keys: [self.legacyHotkeyShortcutKey, self.primaryDictationShortcutsKey]) {
+            let existing = SettingsStore.shared.hotkeyShortcut
+            SettingsStore.shared.primaryDictationShortcuts = []
+            XCTAssertEqual(SettingsStore.shared.primaryDictationShortcuts, [])
+            XCTAssertEqual(SettingsStore.shared.primaryDictationShortcutDisplayString, "Off")
+            SettingsStore.shared.primaryDictationShortcuts = [existing]
+            XCTAssertEqual(SettingsStore.shared.primaryDictationShortcuts, [existing])
+        }
+    }
+
+    func testCancelShortcutRemovalDoesNotRestoreEscape() throws {
+        try self.withRestoredDefaults(keys: ["CancelRecordingHotkeyShortcut"]) {
+            UserDefaults.standard.removeObject(forKey: "CancelRecordingHotkeyShortcut")
+            XCTAssertEqual(SettingsStore.shared.cancelRecordingHotkeyShortcut, HotkeyShortcut(keyCode: 53, modifierFlags: []))
+            SettingsStore.shared.cancelRecordingHotkeyShortcut = nil
+            XCTAssertNil(SettingsStore.shared.cancelRecordingHotkeyShortcut)
+            let shortcut = HotkeyShortcut(keyCode: 53, modifierFlags: [.command])
+            SettingsStore.shared.cancelRecordingHotkeyShortcut = shortcut
+            XCTAssertEqual(SettingsStore.shared.cancelRecordingHotkeyShortcut, shortcut)
+        }
+    }
+
+    func testInputDeliveryTimingRejectsMissingAndFutureEventTimestamps() {
+        let missing = HotkeyInputTiming(receivedAt: 100, eventTimestamp: 0, eventType: 12, receivedTimestamp: 5_000_000_000)
+        XCTAssertNil(missing.deliveryAgeMs)
+        let future = HotkeyInputTiming(receivedAt: 100, eventTimestamp: 6_000_000_000, eventType: 12, receivedTimestamp: 5_000_000_000)
+        XCTAssertNil(future.deliveryAgeMs)
+        let immediate = HotkeyInputTiming(receivedAt: 100, eventTimestamp: 5_000_000_000, eventType: 12, receivedTimestamp: 5_000_000_000)
+        XCTAssertEqual(immediate.deliveryAgeMs, 0)
+    }
+
     private let legacyHotkeyShortcutKey = "HotkeyShortcutKey"
     private let primaryDictationShortcutsKey = "PrimaryDictationShortcuts"
     private let pasteLastTranscriptionShortcutKey = "PasteLastTranscriptionHotkeyShortcut"
@@ -122,6 +259,9 @@ final class HotkeyShortcutTests: XCTestCase {
 
     @MainActor
     func testBottomOverlayRapidStopStartStopDoesNotDropFinalHide() async {
+        let previous = SettingsStore.shared.overlayClosingAnimationEnabled
+        SettingsStore.shared.overlayClosingAnimationEnabled = true
+        defer { SettingsStore.shared.overlayClosingAnimationEnabled = previous }
         let audioPublisher = Just(CGFloat.zero).eraseToAnyPublisher()
         let controller = BottomOverlayWindowController.shared
 
@@ -142,7 +282,42 @@ final class HotkeyShortcutTests: XCTestCase {
     }
 
     @MainActor
+    func testPreparedBottomOverlayStaysInvisibleAcrossScreenChanges() async {
+        let controller = BottomOverlayWindowController.shared
+        let audioPublisher = Just(CGFloat.zero).eraseToAnyPublisher()
+        controller.hideImmediately()
+        controller.destroyWindowForTests()
+        controller.prepare()
+        await Task.yield()
+        XCTAssertTrue(controller.isVisuallyHiddenForTests, "A prepared panel must never be visible before the first show")
+        XCTAssertTrue(controller.isParkedOffscreenForTests)
+
+        // Login, wake and monitor plug post this after the panel was parked.
+        NotificationCenter.default.post(name: NSApplication.didChangeScreenParametersNotification, object: NSApp)
+        await Task.yield()
+        await Task.yield()
+        XCTAssertTrue(controller.isVisuallyHiddenForTests, "A display change must not reveal the parked panel")
+        XCTAssertTrue(controller.isParkedOffscreenForTests, "The panel must be re-parked after a display change")
+
+        controller.show(audioPublisher: audioPublisher, mode: .dictation)
+        XCTAssertFalse(controller.isVisuallyHiddenForTests, "Parking at alpha 0 must not break the next show")
+        controller.hideImmediately()
+    }
+
+    func testBottomOverlayGrowthUsesASpring() {
+        // A spring retargets smoothly when the text keeps growing.
+        XCTAssertEqual(BottomOverlayWindowController.growthAnimation, .spring(response: 0.32, dampingFraction: 0.86))
+    }
+
+    func testBottomOverlayExitUsesMinimalFadeDuration() {
+        XCTAssertEqual(BottomOverlayWindowController.exitDuration, 0.08, accuracy: 0.001)
+    }
+
+    @MainActor
     func testBottomOverlayReportsWhenRapidRestartSupersedesHide() async {
+        let previous = SettingsStore.shared.overlayClosingAnimationEnabled
+        SettingsStore.shared.overlayClosingAnimationEnabled = true
+        defer { SettingsStore.shared.overlayClosingAnimationEnabled = previous }
         let audioPublisher = Just(CGFloat.zero).eraseToAnyPublisher()
         let controller = BottomOverlayWindowController.shared
 
@@ -162,6 +337,29 @@ final class HotkeyShortcutTests: XCTestCase {
     }
 
     @MainActor
+    func testDisabledClosingAnimationHidesWithoutDismissalAndAllowsImmediateRestart() async {
+        let previous = SettingsStore.shared.overlayClosingAnimationEnabled
+        SettingsStore.shared.overlayClosingAnimationEnabled = false
+        defer { SettingsStore.shared.overlayClosingAnimationEnabled = previous }
+        let controller = BottomOverlayWindowController.shared
+        let audioPublisher = Just(CGFloat.zero).eraseToAnyPublisher()
+        controller.show(audioPublisher: audioPublisher, mode: .dictation)
+
+        let outcome = await controller.hideAndWait()
+        XCTAssertEqual(outcome, .hidden)
+        XCTAssertTrue(controller.isVisuallyHiddenForTests)
+        XCTAssertFalse(NotchContentState.shared.isBottomOverlayDismissing)
+        XCTAssertFalse(NotchContentState.shared.isBottomOverlayReleaseTransitioning)
+
+        controller.show(audioPublisher: audioPublisher, mode: .dictation)
+        await Task.yield()
+        XCTAssertFalse(controller.isVisuallyHiddenForTests, "Old deferred cleanup must not hide the new recording")
+        controller.hide()
+        XCTAssertTrue(controller.isVisuallyHiddenForTests)
+        XCTAssertFalse(NotchContentState.shared.isBottomOverlayDismissing)
+    }
+
+    @MainActor
     func testBottomOverlayImmediateHideCompletesBeforeReturningAndAllowsRestart() async {
         let audioPublisher = Just(CGFloat.zero).eraseToAnyPublisher()
         let controller = BottomOverlayWindowController.shared
@@ -177,6 +375,58 @@ final class HotkeyShortcutTests: XCTestCase {
         XCTAssertTrue(NotchContentState.shared.isBottomOverlayPresented)
         XCTAssertFalse(controller.isVisuallyHiddenForTests)
         XCTAssertFalse(NotchContentState.shared.isBottomOverlayDismissing)
+        _ = await controller.hideAndWait()
+    }
+
+    @MainActor
+    func testBottomOverlayReopenStartsAtEmptyHeightBeforeQueuedResize() async throws {
+        let defaults = UserDefaults.standard
+        let overlaySizeKey = "OverlaySize"
+        let streamingPreviewKey = "EnableStreamingPreview"
+        let previousOverlaySize = defaults.object(forKey: overlaySizeKey)
+        let previousStreamingPreview = defaults.object(forKey: streamingPreviewKey)
+        defer {
+            if let previousOverlaySize {
+                defaults.set(previousOverlaySize, forKey: overlaySizeKey)
+            } else {
+                defaults.removeObject(forKey: overlaySizeKey)
+            }
+            if let previousStreamingPreview {
+                defaults.set(previousStreamingPreview, forKey: streamingPreviewKey)
+            } else {
+                defaults.removeObject(forKey: streamingPreviewKey)
+            }
+            NotchContentState.shared.updateTranscription("")
+        }
+
+        SettingsStore.shared.overlaySize = .medium
+        SettingsStore.shared.enableStreamingPreview = true
+        let audioPublisher = Just(CGFloat.zero).eraseToAnyPublisher()
+        let controller = BottomOverlayWindowController.shared
+
+        controller.prepare()
+        controller.show(audioPublisher: audioPublisher, mode: .dictation)
+        let emptySize = try XCTUnwrap(controller.windowSizeForTests)
+
+        NotchContentState.shared.updateTranscription(String(repeating: "multiline preview text ", count: 30))
+        controller.refreshSizeForContent()
+        try await Task.sleep(nanoseconds: 120_000_000)
+        let expandedSize = try XCTUnwrap(controller.windowSizeForTests)
+        XCTAssertGreaterThan(expandedSize.height, emptySize.height)
+
+        _ = await controller.hideAndWait()
+        try await Task.sleep(nanoseconds: 100_000_000)
+        controller.show(audioPublisher: audioPublisher, mode: .dictation)
+        let reopenedSize = try XCTUnwrap(controller.windowSizeForTests)
+        XCTAssertEqual(reopenedSize.height, emptySize.height, accuracy: 0.5)
+
+        // A resize queued by the previous presentation must not restore its frame.
+        controller.refreshSizeForContent()
+        controller.hide()
+        controller.show(audioPublisher: audioPublisher, mode: .dictation)
+        try await Task.sleep(nanoseconds: 120_000_000)
+        let rapidReopenSize = try XCTUnwrap(controller.windowSizeForTests)
+        XCTAssertEqual(rapidReopenSize.height, emptySize.height, accuracy: 0.5)
         _ = await controller.hideAndWait()
     }
 

@@ -59,11 +59,21 @@ final class PrivateAISettingsController: ObservableObject {
     var previewModelID: String { self.session.previewModelID }
     var isBusy: Bool { self.session.isBusy || self.viewModel.isTestingConnection }
     @Published var privateAILoadState: PrivateAIModelLoadState = .idle
+    private var runtimeObserver: NSObjectProtocol?
     @Published var privateAIModelUpdateStatusByID: [String: PrivateAIModelUpdateStatus] = [:]
 
     init(viewModel: AIEnhancementSettingsViewModel) {
         self.viewModel = viewModel
         self.session = PrivateAISettingsSession(selectedModelID: PrivateAIIntegrationService.configuredModelID)
+        self.runtimeObserver = NotificationCenter.default.addObserver(
+            forName: PrivateAIIntegrationService.runtimeDidChangeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.refreshPrivateAILoadState() }
+        }
+    }
+
+    deinit {
+        if let runtimeObserver { NotificationCenter.default.removeObserver(runtimeObserver) }
     }
 
     /// Carousel arrows/dots call this; no defaults, provider, or runtime writes.
@@ -80,10 +90,30 @@ final class PrivateAISettingsController: ObservableObject {
     func usePreviewModel(isInstalled: Bool, onReady: @escaping () -> Void) {
         guard !self.isBusy, let model = PrivateAIModelRegistry.model(id: self.previewModelID) else { return }
         self.persistPrivateAIModelSelection(model.id, loadIfInstalled: false)
+        let activateSmartMode = { [weak self] in
+            guard let self else { return }
+            self.viewModel.selectPrivateAIPromptIfAvailable()
+            onReady()
+        }
         if isInstalled {
-            self.verifyPrivateAIConnection(model, onReady: onReady)
+            self.verifyPrivateAIConnection(model, onReady: activateSmartMode)
         } else {
-            self.downloadPrivateAIModel(model, onReady: onReady)
+            self.downloadPrivateAIModel(model, onReady: activateSmartMode)
+        }
+    }
+
+    /// Drives the Deactivate affordance: stays true after the idle unloader frees the runtime,
+    /// because dictation would still reload Fluid Intelligence on the next run.
+    var routesDictationThroughPrivateAI: Bool { self.viewModel.routesDictationThroughPrivateAI }
+
+    /// Inverse of `usePreviewModel`: stops routing dictation through Fluid Intelligence
+    /// and frees the loaded runtime. The model stays installed and selected.
+    func deactivateSelectedModel() {
+        guard !self.isBusy else { return }
+        self.viewModel.turnOffPrivateAIDictationSlots()
+        Task { @MainActor in
+            await PrivateAIIntegrationService.shared.unloadCachedRuntime(reason: "user deactivated")
+            self.refreshPrivateAILoadState()
         }
     }
 

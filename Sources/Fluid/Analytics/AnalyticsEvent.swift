@@ -5,6 +5,7 @@ enum AnalyticsEvent: String {
     case activeUser = "active_user"
     case usageDailySummary = "usage_daily_summary"
     case modelUsageDailySummary = "model_usage_daily_summary"
+    case insertionLatencyDailySummary = "insertion_latency_daily_summary"
     case onboardingStarted = "onboarding_started"
     case onboardingStepViewed = "onboarding_step_viewed"
     case onboardingStepCompleted = "onboarding_step_completed"
@@ -69,6 +70,43 @@ enum AnalyticsModelRole: String {
     case aiPostProcessing = "ai_post_processing"
 }
 
+enum AnalyticsFluidIntelligenceModel: String {
+    case pico
+    case mini
+
+    init?(modelID: String?) {
+        guard let modelID else { return nil }
+        switch modelID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "fluid-1-pico-96k-dflash":
+            self = .pico
+        case "fluid-1-mini-96k-dflash":
+            self = .mini
+        default:
+            return nil
+        }
+    }
+}
+
+enum AnalyticsInsertionPath: String {
+    case clipboard
+    case direct
+    case clipboardFallback = "clipboard_fallback"
+    case notAttempted = "not_attempted"
+}
+
+enum AnalyticsInsertionOutcome: String {
+    case dispatched
+    case emptyText = "empty_text"
+    case accessibilityNotTrusted = "accessibility_not_trusted"
+    case clipboardSnapshotFailed = "clipboard_snapshot_failed"
+    case clipboardWriteFailed = "clipboard_write_failed"
+    case pasteCommandFailed = "paste_command_failed"
+    case targetUnavailable = "target_unavailable"
+    case targetRestoreFailed = "target_restore_failed"
+    case noEditableTarget = "no_editable_target"
+    case pasteNotLanded = "paste_not_landed"
+}
+
 struct AnalyticsModelDescriptor: Equatable {
     let provider: String
     let model: String
@@ -105,7 +143,6 @@ enum AnalyticsOnboardingOutcome: String {
     case continued
     case skipped
     case completed
-    case openedSettings = "opened_settings"
 }
 
 enum AnalyticsOnboardingTryoutOutcome: String {

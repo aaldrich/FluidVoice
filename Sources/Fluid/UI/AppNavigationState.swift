@@ -12,7 +12,8 @@ enum SidebarItem: Hashable {
     case voiceEngine
     case aiEnhancements
     case cleanupStyles
-    case meetingTools
+    case fileTranscription
+    case meetingTranscription
     case customDictionary
     case stats
     case history
@@ -20,11 +21,42 @@ enum SidebarItem: Hashable {
     case feedback
     case commandMode
     case rewriteMode
+
+    var title: String {
+        switch self {
+        case .welcome: "Dashboard"
+        case .voiceEngine: "Voice Engine"
+        case .aiEnhancements: "AI Providers"
+        case .cleanupStyles: "Cleanup Styles"
+        case .fileTranscription: "File Transcription"
+        case .meetingTranscription: "FluidMeet"
+        case .customDictionary: "Custom Dictionary"
+        case .stats: "Stats"
+        case .history: "History"
+        case .changelog: "Change logs"
+        case .feedback: "Feedback"
+        case .commandMode: "Command Mode"
+        case .rewriteMode: "Edit Mode"
+        }
+    }
+}
+
+/// Read-only projection; changing chrome cannot navigate or alter a page's state.
+struct AppPagePresentation: Equatable {
+    let title: String
+    let showsPageActions: Bool
+
+    init(destination: SidebarItem?, settings: SettingsNavigationState) {
+        self.title = settings.selectedSection?.title ?? (destination ?? .welcome).title
+        self.showsPageActions = !settings.isPresented
+    }
 }
 
 enum SettingsSection: String, CaseIterable, Identifiable, Hashable {
     case general
     case dictation
+    case dictationFormatting
+    case shortcuts
     case notifications
     case audio
     case overlay
@@ -39,6 +71,8 @@ enum SettingsSection: String, CaseIterable, Identifiable, Hashable {
         switch self {
         case .general: return "General"
         case .dictation: return "Dictation"
+        case .dictationFormatting: return "Dictation Formatting"
+        case .shortcuts: return "Shortcuts"
         case .notifications: return "Notifications"
         case .audio: return "Audio"
         case .overlay: return "Overlay"
@@ -50,7 +84,9 @@ enum SettingsSection: String, CaseIterable, Identifiable, Hashable {
     var systemImage: String {
         switch self {
         case .general: return "gearshape"
-        case .dictation: return "keyboard"
+        case .dictation: return "mic"
+        case .dictationFormatting: return "textformat"
+        case .shortcuts: return "keyboard"
         case .notifications: return "bell"
         case .audio: return "speaker.wave.2"
         case .overlay: return "rectangle.on.rectangle"

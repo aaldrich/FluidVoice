@@ -66,6 +66,21 @@ actor PrivateAIIntegrationService {
     }
     #endif
 
+    /// Called only inside the meeting residency scope, after other models are suspended.
+    static func summarizeMeeting(_ transcript: String, style: String) async throws -> String {
+        guard await MeetingModelResidencyCoordinator.shared.phase == .summary else {
+            throw MeetingModelResidencyError.staleGrant
+        }
+        do {
+            let output = try await provider.summarizeMeeting(transcript, style: style)
+            await Task { await self.provider.unloadCachedRuntime(reason: "meeting summary complete") }.value
+            return output
+        } catch {
+            await Task { await self.provider.unloadCachedRuntime(reason: "meeting summary ended") }.value
+            throw error
+        }
+    }
+
     private nonisolated static var provider: any PrivateAIIntegrationProviding {
         PrivateAIProviderFeature.shared.isAvailable
             ? PrivateAIProviderRegistry.integration
@@ -100,8 +115,32 @@ actor PrivateAIIntegrationService {
         self.provider.localModelPath(for: model)
     }
 
+    // Installation checks walk the model directory. SwiftUI bodies ask several
+    // times per frame, so serve a briefly cached answer instead of hitting disk.
+    private nonisolated static let installedModelCacheLock = NSLock()
+    private nonisolated(unsafe) static var installedModelCache: [String: (installed: Bool, checkedAt: TimeInterval)] = [:]
+    private nonisolated static let installedModelCacheLifetime: TimeInterval = 2
+
     nonisolated static func isModelInstalled(_ model: PrivateAIRegisteredModel) -> Bool {
-        self.provider.isModelInstalled(model)
+        let now = ProcessInfo.processInfo.systemUptime
+        self.installedModelCacheLock.lock()
+        let cached = self.installedModelCache[model.id]
+        self.installedModelCacheLock.unlock()
+        if let cached, now - cached.checkedAt < self.installedModelCacheLifetime {
+            return cached.installed
+        }
+
+        let installed = self.provider.isModelInstalled(model)
+        self.installedModelCacheLock.lock()
+        self.installedModelCache[model.id] = (installed, now)
+        self.installedModelCacheLock.unlock()
+        return installed
+    }
+
+    nonisolated static func invalidateInstalledModelCache() {
+        self.installedModelCacheLock.lock()
+        self.installedModelCache.removeAll()
+        self.installedModelCacheLock.unlock()
     }
 
     nonisolated static func canRemoveInstalledModel(_ model: PrivateAIRegisteredModel) -> Bool {
@@ -116,6 +155,7 @@ actor PrivateAIIntegrationService {
     }
 
     nonisolated static func removeInstalledModel(_ model: PrivateAIRegisteredModel) throws {
+        defer { self.invalidateInstalledModelCache() }
         let requestedURLs = self.provider.installedModelURLs(for: model)
         guard !requestedURLs.isEmpty else { return }
         let targetURLs = try self.validatedModelURLs(requestedURLs)
@@ -123,6 +163,7 @@ actor PrivateAIIntegrationService {
     }
 
     nonisolated static func removeInactiveInstalledModels(keeping model: PrivateAIRegisteredModel) throws {
+        defer { self.invalidateInstalledModelCache() }
         let requestedURLs = self.provider.inactiveInstalledModelURLs(keeping: model)
         guard !requestedURLs.isEmpty else { return }
         let targetURLs = try self.validatedModelURLs(requestedURLs)
@@ -133,7 +174,10 @@ actor PrivateAIIntegrationService {
         guard !urls.isEmpty else { return [] }
         let modelDirectoryURL = self.modelDirectoryURL.resolvingSymlinksInPath().standardizedFileURL
         let modelDirectoryPath = modelDirectoryURL.path
-        let targetURLs = Array(Set(urls.map { $0.resolvingSymlinksInPath().standardizedFileURL }))
+        // Preserve provider order: model files precede their installation receipt.
+        var seen = Set<URL>()
+        let targetURLs = urls.map { $0.resolvingSymlinksInPath().standardizedFileURL }
+            .filter { seen.insert($0).inserted }
         guard targetURLs.allSatisfy({ $0.path.hasPrefix(modelDirectoryPath + "/") }) else {
             throw PrivateAIModelRemovalError(message: "A model file is not in FluidVoice's model folder.")
         }
@@ -159,15 +203,22 @@ actor PrivateAIIntegrationService {
     }
 
     func unloadAndRemoveInstalledModel(_ model: PrivateAIRegisteredModel, reason: String) async throws {
-        await self.unloadCachedRuntime(reason: reason)
-        try Self.removeInstalledModel(model)
+        if await MeetingModelResidencyCoordinator.shared.isExclusive {
+            await MeetingModelResidencyCoordinator.shared.vetoRestoration(owner: "fluid")
+            throw MeetingModelResidencyError.busy
+        }
+        try await Self.modelActivity(modelID: model.id) {
+            await Self.provider.unloadCachedRuntime(reason: reason)
+            try Self.removeInstalledModel(model)
+        }
     }
 
     nonisolated static func prepareModel(
         _ model: PrivateAIRegisteredModel,
         progressHandler: PrivateAIModelDownloadProgressHandler? = nil
     ) async throws -> URL {
-        try await self.provider.prepareModel(model, progressHandler: progressHandler)
+        defer { self.invalidateInstalledModelCache() }
+        return try await self.modelActivity(modelID: model.id) { try await self.provider.prepareModel(model, progressHandler: progressHandler) }
     }
 
     nonisolated static func modelUpdateStatus(
@@ -180,15 +231,31 @@ actor PrivateAIIntegrationService {
         _ model: PrivateAIRegisteredModel,
         progressHandler: PrivateAIModelDownloadProgressHandler? = nil
     ) async throws -> PrivateAIModelUpdateToken {
-        try await self.provider.updateModel(model, progressHandler: progressHandler)
+        // Installation, verification and commit/rollback are one transaction. Do not let a
+        // meeting snapshot the temporary runtime between those settings-controller callbacks.
+        let admission = try await MeetingModelResidencyCoordinator.shared.beginOperation(owner: "fluid", modelID: model.id)
+        do {
+            let token = try await Self.modelActivity(modelID: model.id) { try await self.provider.updateModel(model, progressHandler: progressHandler) }
+            await MainActor.run { Self.updateAdmissions[token.id] = admission }
+            return token
+        } catch {
+            await MeetingModelResidencyCoordinator.shared.endOperation(admission)
+            throw error
+        }
     }
 
+    @MainActor private static var updateAdmissions: [UUID: UUID] = [:]
+
     nonisolated static func commitModelUpdate(_ token: PrivateAIModelUpdateToken) async {
+        guard let admission = await MainActor.run(body: { Self.updateAdmissions.removeValue(forKey: token.id) }) else { return }
         await self.provider.commitModelUpdate(token)
+        await MeetingModelResidencyCoordinator.shared.endOperation(admission)
     }
 
     nonisolated static func rollbackModelUpdate(_ token: PrivateAIModelUpdateToken) async {
+        guard let admission = await MainActor.run(body: { Self.updateAdmissions.removeValue(forKey: token.id) }) else { return }
         await self.provider.rollbackModelUpdate(token)
+        await MeetingModelResidencyCoordinator.shared.endOperation(admission)
     }
 
     nonisolated static var isLocalRuntimeConfigured: Bool {
@@ -200,23 +267,69 @@ actor PrivateAIIntegrationService {
     }
 
     func status(for runtime: RuntimeConfiguration) async -> PrivateAIStatus {
-        await Self.provider.status(for: runtime)
+        do { return try await Self.modelActivity { await Self.provider.status(for: runtime) } } catch { return PrivateAIStatus(state: .failed, message: error.localizedDescription) }
+    }
+
+    @MainActor
+    static func meetingResidencyParticipant() -> MeetingModelParticipant {
+        MeetingModelParticipant(
+            owner: "fluid",
+            snapshot: { try await Self.provider.residencySnapshot() },
+            suspend: {
+                await Self.idleUnloader.suspendForMeeting()
+                await Self.provider.unloadCachedRuntime(reason: "meeting processing")
+                await Self.postRuntimeDidChange()
+            },
+            restore: { model in
+                try await Self.modelActivity(modelID: model.id) {
+                    try await Self.provider.restoreResidency(model)
+                }
+            },
+            finish: { await Self.idleUnloader.resumeAfterMeeting() }
+        )
+    }
+
+    private nonisolated static func modelActivity<T: Sendable>(
+        modelID: String? = nil, _ work: () async throws -> T
+    ) async throws -> T {
+        try await MeetingModelResidencyCoordinator.ordinary(owner: "fluid", modelID: modelID ?? self.configuredModelID) {
+            try await Self.idleUnloader.tracking(work)
+        }
     }
 
     func loadedModelState() async -> LoadedModelState? {
         await Self.provider.loadedModelState()
     }
 
-    func loadModel(_ model: PrivateAIRegisteredModel) async throws -> PrivateAIStatus {
-        let status = try await Self.provider.loadModel(model)
-        guard status.state == .ready else { return status }
+    /// Experimental: gives the model's memory back after a quiet period. The
+    /// next dictation reloads it while the user is still speaking.
+    nonisolated static let idleUnloader = PrivateAIIdleUnloader(
+        delay: { await MainActor.run { SettingsStore.shared.privateAIIdleUnloadDelay } },
+        isBusy: { await MainActor.run { AppServices.shared.asr.isRunningOrStarting } },
+        unload: { await PrivateAIIntegrationService.shared.unloadCachedRuntime(reason: "idle") },
+        activityEnded: { await PrivateAIIntegrationService.postRuntimeDidChange() }
+    )
 
-        await self.removeInactiveInstalledModels(keeping: model)
-        return status
+    /// Posted whenever the model may have entered or left memory, so Settings can show
+    /// "Active" for exactly as long as the model is loaded.
+    nonisolated static let runtimeDidChangeNotification = Notification.Name("PrivateAIRuntimeDidChange")
+
+    nonisolated static func postRuntimeDidChange() async {
+        await MainActor.run {
+            NotificationCenter.default.post(name: Self.runtimeDidChangeNotification, object: nil)
+        }
+    }
+
+    func loadModel(_ model: PrivateAIRegisteredModel) async throws -> PrivateAIStatus {
+        try await Self.modelActivity(modelID: model.id) {
+            let status = try await Self.provider.loadModel(model)
+            if status.state == .ready { await self.removeInactiveInstalledModels(keeping: model) }
+            return status
+        }
     }
 
     func verifyModel(_ model: PrivateAIRegisteredModel) async throws -> PrivateAIStatus {
-        try await Self.provider.verifyModel(model)
+        try await Self.modelActivity(modelID: model.id) { try await Self.provider.verifyModel(model) }
     }
 
     func removeInactiveInstalledModels(keeping model: PrivateAIRegisteredModel) async {
@@ -242,14 +355,25 @@ actor PrivateAIIntegrationService {
     }
 
     func prewarmDictation() async {
-        await Self.provider.prewarmDictation()
+        guard !Task.isCancelled else { return }
+        _ = try? await Self.modelActivity { await Self.provider.prewarmDictation() }
     }
 
     func unloadCachedRuntime(reason: String = "manual") async {
+        let token: UUID
+        do {
+            guard let admitted = try await MeetingModelResidencyCoordinator.shared.vetoOrBeginOperation(
+                owner: "fluid", modelID: Self.configuredModelID, vetoDuringMeeting: reason != "idle"
+            ) else { return }
+            token = admitted
+        } catch { return }
         await Self.provider.unloadCachedRuntime(reason: reason)
+        await MeetingModelResidencyCoordinator.shared.endOperation(token)
+        await Self.postRuntimeDidChange()
     }
 
     func shutdownForTermination() async {
+        await MeetingModelResidencyCoordinator.shared.beginTermination()
         await Self.provider.shutdownForTermination()
     }
 
@@ -259,12 +383,14 @@ actor PrivateAIIntegrationService {
         context: AppContext
     ) async throws -> EnhancementResult {
         let budget = try Self.validatedDictationBudget(inputText, contextTokenLimit: runtime.contextTokenLimit)
-        return try await self.dictationProvider.enhanceDictation(
-            inputText,
-            runtime: runtime,
-            context: context,
-            maxOutputTokens: budget.maxOutputTokens
-        )
+        return try await Self.modelActivity {
+            try await self.dictationProvider.enhanceDictation(
+                inputText,
+                runtime: runtime,
+                context: context,
+                maxOutputTokens: budget.maxOutputTokens
+            )
+        }
     }
 
     nonisolated func enhanceDictation(
@@ -274,13 +400,15 @@ actor PrivateAIIntegrationService {
         streamHandler: PrivateAIStreamHandler?
     ) async throws -> EnhancementResult {
         let budget = try Self.validatedDictationBudget(inputText, contextTokenLimit: runtime.contextTokenLimit)
-        return try await self.dictationProvider.enhanceDictation(
-            inputText,
-            runtime: runtime,
-            context: context,
-            maxOutputTokens: budget.maxOutputTokens,
-            streamHandler: streamHandler
-        )
+        return try await Self.modelActivity {
+            try await self.dictationProvider.enhanceDictation(
+                inputText,
+                runtime: runtime,
+                context: context,
+                maxOutputTokens: budget.maxOutputTokens,
+                streamHandler: streamHandler
+            )
+        }
     }
 
     private nonisolated static func validatedDictationBudget(
@@ -303,12 +431,14 @@ actor PrivateAIIntegrationService {
         runtime: RuntimeConfiguration,
         context: AppContext
     ) async throws -> EnhancementResult {
-        try await Self.provider.rewrite(
-            inputText,
-            systemPrompt: systemPrompt,
-            runtime: runtime,
-            context: context
-        )
+        try await Self.modelActivity {
+            try await Self.provider.rewrite(
+                inputText,
+                systemPrompt: systemPrompt,
+                runtime: runtime,
+                context: context
+            )
+        }
     }
 }
 

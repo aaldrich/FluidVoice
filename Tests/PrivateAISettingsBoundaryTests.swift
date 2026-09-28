@@ -12,14 +12,6 @@ struct PrivateAISettingsBoundaryTests {
             precondition(condition, message)
             checks += 1
         }
-        for gigabytes: UInt64 in [4, 8, 12] {
-            check(PrivateAIModelRecommendation.modelID(physicalMemory: gigabytes * 1024 * 1024 * 1024) == "fluid-1-pico-96k-dflash", "Below 16 GB recommends Pico")
-        }
-        for gigabytes: UInt64 in [16, 24, 32, 64, 128] {
-            check(PrivateAIModelRecommendation.modelID(physicalMemory: gigabytes * 1024 * 1024 * 1024) == "fluid-1-mini-96k-dflash", "16 GB and above recommends Mini")
-        }
-        check(PrivateAIModelRecommendation.modelID(physicalMemory: 16 * 1024 * 1024 * 1024 - 1) == "fluid-1-pico-96k-dflash", "Recommendation uses the exact 16 GB boundary")
-
         check(PrivateAIModelCarouselNavigation.next(in: [], current: "missing", forward: true) == nil, "Empty catalog has no navigation target")
         check(PrivateAIModelCarouselNavigation.next(in: ["mini"], current: "mini", forward: false) == "mini", "One model never fabricates a neighbor")
         check(PrivateAIModelCarouselNavigation.next(in: ["pico", "mini"], current: "mini", forward: true) == "pico", "Two-model carousel wraps forward")
@@ -29,7 +21,9 @@ struct PrivateAISettingsBoundaryTests {
         check(PrivateAIModelCarouselNavigation.position(of: "full", in: ["pico", "mini", "full"], current: "mini") == 1, "Three-model carousel places the next card right")
         var session = PrivateAISettingsSession(selectedModelID: "mini")
         let initialRevision = session.revision
-        for id in ["pico", "mini", "pico"] { session.preview(id) }
+        for id in ["pico", "mini", "pico"] {
+            session.preview(id)
+        }
         check(session.previewModelID == "pico", "Preview follows browsing")
         check(session.selectedModelID == "mini", "Browsing must not activate")
         check(session.revision == initialRevision, "Browsing must not invalidate active work")
@@ -150,7 +144,10 @@ struct PrivateAISettingsBoundaryTests {
         let card = try String(contentsOfFile: "Sources/Fluid/UI/AISettings/FluidModelShowcaseCard.swift", encoding: .utf8)
         check(!card.contains(".popover("), "Model information stays inside its card")
         check(card.contains("Button { self.showsInfo.toggle() }"), "Information toggles only local presentation state")
-        check(card.contains("self.reduceMotion ? nil") && card.contains("ZStack(alignment: .topLeading)"), "Inline information respects reduced motion and shares stable content bounds")
+        check(
+            card.contains("self.reduceMotion ? nil") && card.contains("ZStack(alignment: .topLeading)"),
+            "Inline information respects reduced motion and shares stable content bounds"
+        )
         print("Passed \(checks) FI boundary/controller assertions")
     }
 }

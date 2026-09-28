@@ -498,9 +498,15 @@ private final nonisolated class DirectCoreAudioInput: DirectCoreAudioInputContro
             return poisonedStopStatus
         }
         guard let capture else { return noErr }
+        let stopStartedAt = ProcessInfo.processInfo.systemUptime
         let status = fv_core_audio_capture_stop(capture)
+        let hardwareStoppedAt = ProcessInfo.processInfo.systemUptime
         fv_core_audio_capture_wake(capture)
         self.workerGroup.wait()
+        DebugLogger.shared.debug(
+            "STOP_TRACE backend=direct hardwareStopMs=\(Int((hardwareStoppedAt - stopStartedAt) * 1000)) workerDrainMs=\(Int((ProcessInfo.processInfo.systemUptime - hardwareStoppedAt) * 1000))",
+            source: "StopTiming"
+        )
         if status != noErr {
             self.poisonedStopStatus = status
         }
@@ -1108,8 +1114,12 @@ final nonisolated class DirectCoreAudioLifecycleController: @unchecked Sendable 
     }
 
     func stop(retainPrepared: Bool, reason: String, recoveringRoute: Bool = false) async -> StopReport {
+        let requestedAt = ProcessInfo.processInfo.systemUptime
         do {
             return try await self.performHardwareOperation(cancellable: false, timeout: recoveringRoute ? self.recoveryTimeout : nil) {
+                var trace = OverlayCloseTrace("audio.lifecycleQueue")
+                trace.mark("queueWait", since: requestedAt)
+                defer { trace.finish() }
                 guard let input = self.input else {
                     return StopReport(
                         status: noErr,
@@ -1130,6 +1140,7 @@ final nonisolated class DirectCoreAudioLifecycleController: @unchecked Sendable 
                     level: .info
                 )
                 let status = input.stop()
+                trace.mark("snapshotAndHardwareStop")
                 let droppedPackets = input.droppedPacketCount
                 if status != noErr {
                     self.isPoisoned = true
@@ -1155,6 +1166,8 @@ final nonisolated class DirectCoreAudioLifecycleController: @unchecked Sendable 
                         "retained=\(retainPrepared && self.input != nil)",
                     level: .info
                 )
+                trace.mark("postStopState")
+                DebugLogger.shared.debug("CLOSE_DETAIL audioContinuationResume uptime=\(ProcessInfo.processInfo.systemUptime)", source: "StopTiming")
                 return StopReport(
                     status: status,
                     droppedPackets: droppedPackets,
@@ -1489,6 +1502,28 @@ final nonisolated class DirectCoreAudioLifecycleController: @unchecked Sendable 
         }
 
         let block = Self.makeDevicePropertyListener(objectID: objectID) { [weak self, weak input] objectID in
+            #if DEBUG
+            AudioTopologyDiagnostics.record(
+                .callbackBegin,
+                owner: .directCoreAudio,
+                objectID: objectID,
+                selector: selector,
+                scope: scope,
+                element: kAudioObjectPropertyElementMain,
+                queueRole: .dedicatedDelivery,
+                generation: generation
+            )
+            defer { AudioTopologyDiagnostics.record(
+                .callbackEnd,
+                owner: .directCoreAudio,
+                objectID: objectID,
+                selector: selector,
+                scope: scope,
+                element: kAudioObjectPropertyElementMain,
+                queueRole: .dedicatedDelivery,
+                generation: generation
+            ) }
+            #endif
             let deviceIsAlive =
                 name == "device_is_alive"
                     ? Self.readDeviceLiveness(objectID: objectID)
@@ -1512,12 +1547,39 @@ final nonisolated class DirectCoreAudioLifecycleController: @unchecked Sendable 
                 hardwareIsKnownStopped: hardwareIsKnownStopped
             )
         }
+        #if DEBUG
+        AudioTopologyDiagnostics.record(
+            .listenerAddBegin,
+            owner: .directCoreAudio,
+            objectID: objectID,
+            selector: address.mSelector,
+            scope: address.mScope,
+            element: address.mElement,
+            queueRole: .dedicatedControl,
+            phase: .listener,
+            generation: generation
+        )
+        #endif
         let status = AudioObjectAddPropertyListenerBlock(
             objectID,
             &address,
             self.listenerQueue,
             block
         )
+        #if DEBUG
+        AudioTopologyDiagnostics.record(
+            .listenerAddEnd,
+            owner: .directCoreAudio,
+            objectID: objectID,
+            selector: address.mSelector,
+            scope: address.mScope,
+            element: address.mElement,
+            queueRole: .dedicatedControl,
+            phase: .listener,
+            status: status,
+            generation: generation
+        )
+        #endif
         guard status == noErr else {
             if policy != .optional {
                 throw Self.error(
@@ -1657,6 +1719,18 @@ final nonisolated class DirectCoreAudioLifecycleController: @unchecked Sendable 
         )
         var isAlive: UInt32 = 0
         var size = UInt32(MemoryLayout<UInt32>.size)
+        #if DEBUG
+        AudioTopologyDiagnostics.record(
+            .halQueryBegin,
+            owner: .directCoreAudio,
+            objectID: objectID,
+            selector: address.mSelector,
+            scope: address.mScope,
+            element: address.mElement,
+            queueRole: .dedicatedDelivery,
+            phase: .listener
+        )
+        #endif
         let status = AudioObjectGetPropertyData(
             objectID,
             &address,
@@ -1665,6 +1739,19 @@ final nonisolated class DirectCoreAudioLifecycleController: @unchecked Sendable 
             &size,
             &isAlive
         )
+        #if DEBUG
+        AudioTopologyDiagnostics.record(
+            .halQueryEnd,
+            owner: .directCoreAudio,
+            objectID: objectID,
+            selector: address.mSelector,
+            scope: address.mScope,
+            element: address.mElement,
+            queueRole: .dedicatedDelivery,
+            phase: .listener,
+            status: status
+        )
+        #endif
         // An object removed from HAL is gone; other unreadable results are
         // unknown and must not authorize replacement after failed teardown.
         if status == kAudioHardwareBadDeviceError || status == kAudioHardwareBadObjectError { return false }
@@ -1728,12 +1815,37 @@ final nonisolated class DirectCoreAudioLifecycleController: @unchecked Sendable 
     ) {
         for registration in registrations {
             var address = registration.address
+            #if DEBUG
+            AudioTopologyDiagnostics.record(
+                .listenerRemoveBegin,
+                owner: .directCoreAudio,
+                objectID: registration.objectID,
+                selector: address.mSelector,
+                scope: address.mScope,
+                element: address.mElement,
+                queueRole: .dedicatedControl,
+                phase: .listener
+            )
+            #endif
             let status = AudioObjectRemovePropertyListenerBlock(
                 registration.objectID,
                 &address,
                 queue,
                 registration.block
             )
+            #if DEBUG
+            AudioTopologyDiagnostics.record(
+                .listenerRemoveEnd,
+                owner: .directCoreAudio,
+                objectID: registration.objectID,
+                selector: address.mSelector,
+                scope: address.mScope,
+                element: address.mElement,
+                queueRole: .dedicatedControl,
+                phase: .listener,
+                status: status
+            )
+            #endif
             if status != noErr, status != kAudioHardwareBadObjectError {
                 Self.log(
                     "Direct capture listener removal failed object=\(registration.objectID) " +

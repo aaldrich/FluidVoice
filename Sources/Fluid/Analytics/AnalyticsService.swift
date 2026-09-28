@@ -63,15 +63,34 @@ final class AnalyticsService {
         }
     }
 
-    /// Beta builds aggregate these timings locally and emit one summary per day.
+    /// Beta builds aggregate Fluid Intelligence throughput locally and emit one summary per day.
     func recordBetaDictationPerformance(
-        asrMilliseconds: Int?,
-        fluidIntelligenceMilliseconds: Int?
+        fluidModel: AnalyticsFluidIntelligenceModel?,
+        tokensPerSecond: Double?
     ) {
         self.submit { core, context in
             await core.recordBetaDictationPerformance(
-                asrMilliseconds: asrMilliseconds,
-                fluidIntelligenceMilliseconds: fluidIntelligenceMilliseconds,
+                fluidModel: fluidModel,
+                tokensPerSecond: tokensPerSecond,
+                context: context
+            )
+        }
+    }
+
+    func recordInsertionLatency(
+        path: AnalyticsInsertionPath,
+        outcome: AnalyticsInsertionOutcome,
+        requestMilliseconds: Int,
+        readyMilliseconds: Int?,
+        toggleStopMilliseconds: Int?
+    ) {
+        self.submit { core, context in
+            await core.recordInsertionLatency(
+                path: path,
+                outcome: outcome,
+                requestMilliseconds: requestMilliseconds,
+                readyMilliseconds: readyMilliseconds,
+                toggleStopMilliseconds: toggleStopMilliseconds,
                 context: context
             )
         }
@@ -319,8 +338,8 @@ private actor AnalyticsCore {
     }
 
     func recordBetaDictationPerformance(
-        asrMilliseconds: Int?,
-        fluidIntelligenceMilliseconds: Int?,
+        fluidModel: AnalyticsFluidIntelligenceModel?,
+        tokensPerSecond: Double?,
         context: AnalyticsContext
     ) async {
         guard context.collectsBetaPerformance,
@@ -329,14 +348,34 @@ private actor AnalyticsCore {
         do {
             let database = try self.database(for: context)
             try database.recordDictationPerformance(
-                asrMilliseconds: asrMilliseconds,
-                fluidIntelligenceMilliseconds: fluidIntelligenceMilliseconds,
+                fluidModel: fluidModel,
+                tokensPerSecond: tokensPerSecond,
                 measuredAppVersion: context.appVersion,
                 at: Date()
             )
             self.startFlushLoopIfNeeded()
         } catch {
             return
+        }
+    }
+
+    func recordInsertionLatency(
+        path: AnalyticsInsertionPath,
+        outcome: AnalyticsInsertionOutcome,
+        requestMilliseconds: Int,
+        readyMilliseconds: Int?,
+        toggleStopMilliseconds: Int?,
+        context: AnalyticsContext
+    ) async {
+        await self.writeDetailed(context: context) { database, date in
+            try database.recordInsertionLatency(
+                path: path,
+                outcome: outcome,
+                requestMilliseconds: requestMilliseconds,
+                readyMilliseconds: readyMilliseconds,
+                toggleStopMilliseconds: toggleStopMilliseconds,
+                at: date
+            )
         }
     }
 

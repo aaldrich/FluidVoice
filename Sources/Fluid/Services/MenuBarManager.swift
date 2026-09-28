@@ -7,10 +7,30 @@ enum MenuBarNavigationDestination: String {
     case customDictionary
     case microphoneSettings
     case settings
+    case meetingTranscription
+    case preferences
 }
 
 @MainActor
 final class MenuBarManager: NSObject, ObservableObject, NSMenuDelegate {
+    private enum MeetingMenuActivity: Equatable {
+        case inactive
+        case preparing
+        case recording
+        case stopping
+        case processing
+        case interrupted
+        case failed
+        case completed
+    }
+
+    private struct MeetingMenuPresentation {
+        var activity: MeetingMenuActivity = .inactive
+        var sourceName: String?
+        var startedAt: Date?
+        var attentionStatus: String?
+    }
+
     private var statusItem: NSStatusItem?
     private var menu: NSMenu?
     private var isSetup: Bool = false
@@ -22,13 +42,25 @@ final class MenuBarManager: NSObject, ObservableObject, NSMenuDelegate {
     private var rollbackMenuItem: NSMenuItem?
     private var microphoneMenuItem: NSMenuItem?
     private var microphoneSubmenu: NSMenu?
+    private var startMeetingRecordingMenuItem: NSMenuItem?
+    private(set) var meetingStartRequested = false
+    private(set) var meetingStartError: String?
+    private var stopMeetingRecordingMenuItem: NSMenuItem?
+    private var meetingStatusMenuItem: NSMenuItem?
+    private var openMeetingTranscriptionMenuItem: NSMenuItem?
+    private var meetingMenuSeparator: NSMenuItem?
+    private var meetingMenuPresentation = MeetingMenuPresentation()
+    private var meetingStopRequested = false
+    private var stopMeetingRecordingHandler: (() -> Void)?
 
     // References to app state
     private weak var asrService: ASRService?
+    private weak var meetingCoordinator: MeetingSessionCoordinator?
     private var cancellables = Set<AnyCancellable>()
     private var hasDeferredStopMenuRefresh = false
     private var hasDeferredStoppedRecordingState = false
     private var configuredASRIdentifier: ObjectIdentifier?
+    private var meetingCancellables = Set<AnyCancellable>()
 
     /// Overlay management (persistent, independent of window lifecycle)
     private var overlayVisible: Bool = false
@@ -114,6 +146,11 @@ final class MenuBarManager: NSObject, ObservableObject, NSMenuDelegate {
             }
             .store(in: &self.cancellables)
 
+        NotificationCenter.default.addObserver(forName: .fluidPasteNotLanded, object: nil, queue: .main) { [weak self] note in
+            guard let transcript = note.userInfo?["transcript"] as? String else { return }
+            Task { @MainActor [weak self] in self?.showPasteNotLandedFailure(transcript: transcript) }
+        }
+
         // Subscribe to recording state changes
         asrService.$isRunning
             .receive(on: DispatchQueue.main)
@@ -127,6 +164,8 @@ final class MenuBarManager: NSObject, ObservableObject, NSMenuDelegate {
                 }
                 if isRunning {
                     self.hasDeferredStoppedRecordingState = false
+                    OverlayAudioLevelState.shared.isLive = true
+                    DebugLogger.shared.debug("WAVEFORM_LIVE", source: "StopTiming")
                 }
                 self.isRecording = isRunning
                 self.updateMenuBarIcon()
@@ -158,23 +197,173 @@ final class MenuBarManager: NSObject, ObservableObject, NSMenuDelegate {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] newText in
                 guard self != nil else { return }
-                if asrService.isRunning,
-                   NotchContentState.shared.mode == .dictation,
-                   SettingsStore.shared.spokenSendEnabled,
-                   !SettingsStore.shared.spokenSendImmediatelyEnabled
-                {
-                    let detected = SpokenSendParser.parse(
-                        newText,
-                        phrase: SettingsStore.shared.spokenSendPhrase,
-                        enabled: true
-                    ).shouldSend
-                    NotchContentState.shared.setSpokenSendIndicatorState(detected ? .detected : .hidden)
-                }
                 if NotchOverlayManager.shared.shouldShowOrTrackLivePreviewText {
                     NotchOverlayManager.shared.updateTranscriptionText(newText)
                 }
             }
             .store(in: &self.cancellables)
+    }
+
+    func configure(meetingCoordinator: MeetingSessionCoordinator) {
+        guard self.meetingCoordinator !== meetingCoordinator else {
+            self.applyMeetingPresentation(
+                state: meetingCoordinator.state,
+                activeSession: meetingCoordinator.activeSession,
+                latestCompletedSession: meetingCoordinator.latestCompletedSession
+            )
+            return
+        }
+
+        self.meetingCancellables.removeAll()
+        self.meetingCoordinator = meetingCoordinator
+        self.stopMeetingRecordingHandler = { [weak meetingCoordinator] in
+            guard let meetingCoordinator else { return }
+            Task { @MainActor in
+                do {
+                    _ = try await meetingCoordinator.stopAndTranscribe()
+                } catch {
+                    DebugLogger.shared.error(
+                        "Menu action: Stop meeting recording failed: \(error.localizedDescription)",
+                        source: "MenuBarManager"
+                    )
+                }
+            }
+        }
+
+        Publishers.CombineLatest3(
+            meetingCoordinator.$state,
+            meetingCoordinator.$activeSession,
+            meetingCoordinator.$latestCompletedSession
+        )
+        .receive(on: DispatchQueue.main)
+        .sink { [weak self] state, activeSession, latestCompletedSession in
+            self?.applyMeetingPresentation(
+                state: state,
+                activeSession: activeSession,
+                latestCompletedSession: latestCompletedSession
+            )
+        }
+        .store(in: &self.meetingCancellables)
+    }
+
+    private func applyMeetingPresentation(
+        state: MeetingCoordinatorState,
+        activeSession: MeetingSession?,
+        latestCompletedSession: MeetingSession?
+    ) {
+        let previousActivity = self.meetingMenuPresentation.activity
+        switch state {
+        case .recording, .recordingDegraded:
+            break
+        default:
+            self.meetingStopRequested = false
+        }
+
+        switch state {
+        case .idle:
+            self.meetingMenuPresentation = MeetingMenuPresentation()
+        case .preparing:
+            self.meetingStartError = nil
+            self.meetingMenuPresentation = MeetingMenuPresentation(
+                activity: .preparing,
+                sourceName: activeSession?.capturedApplication?.displayName,
+                startedAt: activeSession?.startedAt
+            )
+        case .recording, .recordingDegraded:
+            self.meetingMenuPresentation = MeetingMenuPresentation(
+                activity: .recording,
+                sourceName: activeSession?.capturedApplication?.displayName ?? "In-room meeting",
+                startedAt: activeSession?.startedAt
+            )
+        case .stopping:
+            self.meetingMenuPresentation = MeetingMenuPresentation(
+                activity: .stopping,
+                sourceName: activeSession?.capturedApplication?.displayName ?? "In-room meeting",
+                startedAt: activeSession?.startedAt
+            )
+        case .processing:
+            self.meetingMenuPresentation = MeetingMenuPresentation(
+                activity: .processing,
+                sourceName: activeSession?.capturedApplication?.displayName,
+                startedAt: nil
+            )
+        case .completed:
+            self.meetingMenuPresentation = MeetingMenuPresentation(
+                activity: .completed,
+                sourceName: latestCompletedSession?.capturedApplication?.displayName,
+                startedAt: nil
+            )
+        case .interrupted:
+            self.meetingMenuPresentation = MeetingMenuPresentation(
+                activity: .interrupted,
+                sourceName: activeSession?.capturedApplication?.displayName,
+                startedAt: activeSession?.startedAt,
+                attentionStatus: Self.interruptionStatus(for: activeSession)
+            )
+        case let .failed(_, failure):
+            self.meetingMenuPresentation = MeetingMenuPresentation(
+                activity: .failed,
+                sourceName: activeSession?.capturedApplication?.displayName,
+                startedAt: activeSession?.startedAt,
+                attentionStatus: Self.failureStatus(for: activeSession, failure: failure)
+            )
+        }
+
+        if self.meetingMenuPresentation.activity != previousActivity {
+            self.announceMeetingActivity(self.meetingMenuPresentation)
+        }
+
+        self.updateMenuBarIcon()
+        self.updateMenu()
+    }
+
+    private func announceMeetingActivity(_ presentation: MeetingMenuPresentation) {
+        let announcement: String?
+        switch presentation.activity {
+        case .inactive:
+            announcement = nil
+        case .preparing:
+            announcement = "Starting meeting recording"
+        case .recording:
+            announcement = "Meeting recording started"
+        case .stopping:
+            announcement = "Stopping meeting recording"
+        case .processing:
+            announcement = "Meeting transcription started"
+        case .interrupted:
+            announcement = presentation.attentionStatus ?? "Meeting recording interrupted"
+        case .failed:
+            announcement = presentation.attentionStatus ?? "Meeting setup failed"
+        case .completed:
+            announcement = "Meeting transcription complete"
+        }
+        guard let announcement else { return }
+        AccessibilityNotification.Announcement(announcement).post()
+    }
+
+    private static func interruptionStatus(for session: MeetingSession?) -> String {
+        guard let session else { return "Meeting setup interrupted" }
+        if session.endedAt != nil, !session.processingAttempts.isEmpty {
+            return "Meeting transcription interrupted"
+        }
+        return "Meeting recording interrupted"
+    }
+
+    private static func failureStatus(
+        for session: MeetingSession?,
+        failure: MeetingSessionFailure
+    ) -> String {
+        if failure.domain == .processing {
+            return "Meeting transcription failed"
+        }
+        let hasRecoverableAudio = session.map { session in
+            session.endedAt != nil && session.audioTracks.contains { track in
+                track.chunks.contains {
+                    $0.finalizationState == .finalized && $0.byteCount > 0
+                }
+            }
+        } ?? false
+        return hasRecoverableAudio ? "Meeting recording failed" : "Meeting setup failed"
     }
 
     private func handleOverlayState(isRunning: Bool, asrService: ASRService) {
@@ -302,6 +491,13 @@ final class MenuBarManager: NSObject, ObservableObject, NSMenuDelegate {
         }
     }
 
+    /// A verified non-landing paste re-presents the overlay in its failure
+    /// state so the transcript can be copied.
+    func showPasteNotLandedFailure(transcript: String) {
+        guard !self.overlayVisible, !self.isProcessingActive, self.asrService?.isRunning != true else { return }
+        DeliveryFailureOverlayController.shared.show(kind: .pasteNotLanded, transcript: transcript)
+    }
+
     func showRecordingOverlayImmediately() {
         AutomaticDictionaryCorrectionTracker.shared.cancel()
 
@@ -321,6 +517,7 @@ final class MenuBarManager: NSObject, ObservableObject, NSMenuDelegate {
         }
 
         self.overlayVisible = true
+        DeliveryFailureOverlayController.shared.hide()
         self.overlayBench("instant_show_request mode=\(self.currentOverlayMode.rawValue)")
 
         if NotchOverlayManager.shared.isCommandOutputExpanded {
@@ -395,6 +592,19 @@ final class MenuBarManager: NSObject, ObservableObject, NSMenuDelegate {
             "reserve_processing overlayVisible=\(self.overlayVisible) active=\(self.isProcessingActive)"
         )
         self.isProcessingActive = true
+        NotchOverlayManager.shared.freezeForStop()
+        // Diagnostics only: three Accessibility round-trips on the stop path
+        // are not worth paying in Release just to audit the focused element.
+        if DebugLogger.diagnosticsEnabled {
+            let assessStartedAt = ProcessInfo.processInfo.systemUptime
+            let assessment = DeliveryTargetAssessment.assessFocusedElement()
+            DebugLogger.shared.info(
+                "FOCUS_ASSESS at=stop \(assessment.logDescription) " +
+                    "frontApp=\(NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "nil") " +
+                    "elapsedUs=\(Int((ProcessInfo.processInfo.systemUptime - assessStartedAt) * 1_000_000))",
+                source: "TypingService"
+            )
+        }
         self.pendingProcessingShowOperation?.cancel()
         self.pendingProcessingShowOperation = nil
         self.pendingHideOperation?.cancel()
@@ -455,29 +665,61 @@ final class MenuBarManager: NSObject, ObservableObject, NSMenuDelegate {
         }
     }
 
-    /// Removes the successful recording overlay after insertion completes. There
-    /// is intentionally no separate exit animation on this latency-critical path.
+    /// Removes the completed recording overlay immediately unless the optional
+    /// closing transition is enabled.
     func beginProcessingCompletionAndHideOverlay() {
         let startedAt = ProcessInfo.processInfo.systemUptime
         self.prepareForProcessingCompletion()
-        self.overlayBench("finish_hide_request mode=immediate")
-        NotchOverlayManager.shared.hideImmediately()
-        self.flushDeferredStoppedRecordingState()
+        self.overlayBench("finish_hide_request closingAnimation=\(SettingsStore.shared.overlayClosingAnimationEnabled)")
+        NotchOverlayManager.shared.hide()
+        let windowHideReturnedAt = ProcessInfo.processInfo.systemUptime
+        // The status item refresh is a WindowServer fence; keep it out of the
+        // transaction that removes the overlay.
+        CATransaction.setCompletionBlock { [weak self] in
+            MainActor.assumeIsolated {
+                let refreshStartedAt = ProcessInfo.processInfo.systemUptime
+                self?.flushDeferredStoppedRecordingState()
+                DebugLogger.shared.debug(
+                    "HIDE_NOW postCommitMenuRefreshUs=\(Int((ProcessInfo.processInfo.systemUptime - refreshStartedAt) * 1_000_000))",
+                    source: "StopTiming"
+                )
+            }
+        }
+        DebugLogger.shared.debug(
+            "HIDE_NOW windowHideUs=\(Int((windowHideReturnedAt - startedAt) * 1_000_000)) " +
+                "menuRefreshUs=\(Int((ProcessInfo.processInfo.systemUptime - windowHideReturnedAt) * 1_000_000))",
+            source: "StopTiming"
+        )
+        DebugLogger.shared.debug(
+            "STOP_TRACE phase=hide_dispatched closingAnimation=\(SettingsStore.shared.overlayClosingAnimationEnabled) elapsedMs=\(Int((ProcessInfo.processInfo.systemUptime - startedAt) * 1000))",
+            source: "StopTiming"
+        )
         self.overlayBench(
-            "finish_hide_complete mode=immediate elapsedMs=\(Int(((ProcessInfo.processInfo.systemUptime - startedAt) * 1000).rounded()))"
+            "finish_hide_dispatched elapsedMs=\(Int(((ProcessInfo.processInfo.systemUptime - startedAt) * 1000).rounded()))"
         )
     }
 
     /// Ends processing and waits for the recording overlay's exit transition.
     /// Use only when the caller must know the overlay has fully disappeared.
     func finishProcessingAndHideOverlay() async {
+        guard SettingsStore.shared.overlayClosingAnimationEnabled else {
+            self.beginProcessingCompletionAndHideOverlay()
+            return
+        }
         let startedAt = ProcessInfo.processInfo.systemUptime
         self.prepareForProcessingCompletion()
+        DebugLogger.shared.debug("HIDE_TRACE phase=completion_prepared elapsedUs=\(Int((ProcessInfo.processInfo.systemUptime - startedAt) * 1_000_000))", source: "StopTiming")
 
         NotchOverlayManager.shared.setProcessing(false)
+        DebugLogger.shared.debug("HIDE_TRACE phase=processing_cleared elapsedUs=\(Int((ProcessInfo.processInfo.systemUptime - startedAt) * 1_000_000))", source: "StopTiming")
         self.overlayBench("finish_hide_request mode=awaited")
         let hideOutcome = await NotchOverlayManager.shared.hideAndWait()
+        let hiddenAt = ProcessInfo.processInfo.systemUptime
         self.flushDeferredStoppedRecordingState()
+        DebugLogger.shared.debug(
+            "STOP_TRACE phase=overlay_hidden hideMs=\(Int((hiddenAt - startedAt) * 1000)) menuRefreshMs=\(Int((ProcessInfo.processInfo.systemUptime - hiddenAt) * 1000))",
+            source: "StopTiming"
+        )
         self.overlayBench(
             "finish_hide_complete outcome=\(hideOutcome) elapsedMs=\(Int(((ProcessInfo.processInfo.systemUptime - startedAt) * 1000).rounded()))"
         )
@@ -486,6 +728,22 @@ final class MenuBarManager: NSObject, ObservableObject, NSMenuDelegate {
     /// Ends processing without dismissing an actionable overlay, such as the
     /// AI fallback state that offers reprocessing and settings actions.
     func finishProcessingKeepingOverlayVisible() {
+        // A delivery failure must always be visible. The transient card is
+        // used when the dictation overlay is already gone (the no-AI fast
+        // path hides it before delivery), when the failure needs the
+        // Accessibility settings action, or for the no-text-field case.
+        let state = NotchContentState.shared
+        if state.isTextDeliveryFailureVisible,
+           let failure = state.textDeliveryFailure,
+           let kind = DeliveryFailureOverlayController.Kind(failure: failure),
+           Self.usesTransientFailureCard(kind: kind, overlayVisible: NotchOverlayManager.shared.isOverlayVisible)
+        {
+            let transcript = state.textDeliveryFailureTranscript
+            state.clearTextDeliveryFailure()
+            self.beginProcessingCompletionAndHideOverlay()
+            DeliveryFailureOverlayController.shared.show(kind: kind, transcript: transcript)
+            return
+        }
         self.cancelPendingProcessingCompletionOperations()
         self.isProcessingActive = false
         // Keep the physical overlay visible, but release recording/processing
@@ -494,6 +752,10 @@ final class MenuBarManager: NSObject, ObservableObject, NSMenuDelegate {
         NotchOverlayManager.shared.setProcessing(false)
         self.flushDeferredStoppedRecordingState()
         self.overlayBench("finish_keep_visible")
+    }
+
+    nonisolated static func usesTransientFailureCard(kind: DeliveryFailureOverlayController.Kind, overlayVisible: Bool) -> Bool {
+        kind == .noEditableTarget || kind.offersAccessibilitySettings || !overlayVisible
     }
 
     /// Recording-state observers rebuild AppKit/SwiftUI surfaces. Hold that work
@@ -527,8 +789,8 @@ final class MenuBarManager: NSObject, ObservableObject, NSMenuDelegate {
         self.overlayVisible = false
     }
 
-    private func overlayBench(_ message: String) {
-        DebugLogger.shared.benchmark("OVERLAY_BENCH", message: "manager \(message)", source: "OverlayBenchmark")
+    private func overlayBench(_ message: @autoclosure () -> String) {
+        DebugLogger.shared.benchmark("OVERLAY_BENCH", message: "manager \(message())", source: "OverlayBenchmark")
     }
 
     private func setupMenuBarSafely() {
@@ -568,19 +830,128 @@ final class MenuBarManager: NSObject, ObservableObject, NSMenuDelegate {
     }
 
     private func updateMenuBarIcon() {
-        guard let statusItem = statusItem else { return }
+        guard let statusItem = statusItem, statusItem.button?.image == nil else { return }
 
-        // Use MenuBarIcon asset - vectorized from logo
+        // The template icon is identical in every state. Assigning a fresh
+        // NSImage on each recording change forced a status item redraw plus a
+        // WindowServer fence (about 200 ms measured) on every start and stop.
         if let image = NSImage(named: "MenuBarIcon") {
-            image.isTemplate = true // Adapts to light/dark mode and tints red when recording
-            statusItem.button?.image = image
+            switch self.meetingMenuPresentation.activity {
+            case .recording, .stopping:
+                statusItem.button?.image = self.menuBarActivityImage(baseImage: image, activity: .recording)
+                statusItem.button?.setAccessibilityLabel(
+                    self.meetingMenuPresentation.activity == .stopping
+                        ? "FluidVoice, stopping meeting recording"
+                        : "FluidVoice, meeting recording"
+                )
+            case .preparing, .processing:
+                statusItem.button?.image = self.menuBarActivityImage(baseImage: image, activity: .processing)
+                statusItem.button?.setAccessibilityLabel(
+                    self.meetingMenuPresentation.activity == .preparing
+                        ? "FluidVoice, starting meeting recording"
+                        : "FluidVoice, transcribing meeting"
+                )
+            case .interrupted, .failed:
+                statusItem.button?.image = self.menuBarActivityImage(baseImage: image, activity: .interrupted)
+                let status = self.meetingMenuPresentation.attentionStatus ?? "Meeting needs attention"
+                statusItem.button?.setAccessibilityLabel("FluidVoice, \(status.lowercased())")
+            case .inactive:
+                image.isTemplate = true
+                statusItem.button?.image = image
+                statusItem.button?.setAccessibilityLabel("FluidVoice")
+            case .completed:
+                image.isTemplate = true
+                statusItem.button?.image = image
+                statusItem.button?.setAccessibilityLabel("FluidVoice, meeting transcription complete")
+            }
         }
+    }
+
+    private func menuBarActivityImage(baseImage: NSImage, activity: MeetingMenuActivity) -> NSImage {
+        let image = NSImage(size: NSSize(width: 18, height: 18), flipped: false) { _ in
+            baseImage.draw(
+                in: NSRect(x: 0, y: 1, width: 15, height: 15),
+                from: .zero,
+                operation: .sourceOver,
+                fraction: 1
+            )
+
+            let badgeRect = NSRect(x: 10, y: 0, width: 8, height: 8)
+            let badgePath = NSBezierPath()
+            switch activity {
+            case .recording, .stopping:
+                badgePath.appendOval(in: badgeRect)
+                badgePath.appendRoundedRect(
+                    NSRect(x: 12.25, y: 2.25, width: 3.5, height: 3.5),
+                    xRadius: 0.7,
+                    yRadius: 0.7
+                )
+            case .preparing, .processing:
+                badgePath.move(to: NSPoint(x: badgeRect.midX, y: badgeRect.maxY))
+                badgePath.line(to: NSPoint(x: badgeRect.maxX, y: badgeRect.midY))
+                badgePath.line(to: NSPoint(x: badgeRect.midX, y: badgeRect.minY))
+                badgePath.line(to: NSPoint(x: badgeRect.minX, y: badgeRect.midY))
+                badgePath.close()
+                badgePath.appendOval(in: NSRect(x: 12.5, y: 2.5, width: 3, height: 3))
+            case .interrupted, .failed:
+                badgePath.move(to: NSPoint(x: badgeRect.midX, y: badgeRect.maxY))
+                badgePath.line(to: NSPoint(x: badgeRect.maxX, y: badgeRect.minY))
+                badgePath.line(to: NSPoint(x: badgeRect.minX, y: badgeRect.minY))
+                badgePath.close()
+                badgePath.appendOval(in: NSRect(x: 13, y: 2.2, width: 2, height: 2))
+            case .inactive, .completed:
+                break
+            }
+            badgePath.windingRule = .evenOdd
+            NSColor.black.setFill()
+            badgePath.fill()
+            return true
+        }
+        image.isTemplate = true
+        image.accessibilityDescription = "FluidVoice meeting status"
+        return image
     }
 
     private func buildMenuStructure() {
         guard let menu = menu else { return }
 
         menu.removeAllItems()
+
+        let startMeetingItem = NSMenuItem(
+            title: "Start Meeting Recording",
+            action: #selector(startMeetingRecording),
+            keyEquivalent: ""
+        )
+        startMeetingItem.target = self
+        menu.addItem(startMeetingItem)
+        self.startMeetingRecordingMenuItem = startMeetingItem
+
+        let stopMeetingItem = NSMenuItem(
+            title: "Stop Meeting Recording",
+            action: #selector(stopMeetingRecording),
+            keyEquivalent: ""
+        )
+        stopMeetingItem.target = self
+        menu.addItem(stopMeetingItem)
+        self.stopMeetingRecordingMenuItem = stopMeetingItem
+
+        let meetingStatusItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+        meetingStatusItem.isEnabled = false
+        menu.addItem(meetingStatusItem)
+        self.meetingStatusMenuItem = meetingStatusItem
+
+        let openMeetingItem = NSMenuItem(
+            title: "Open FluidMeet",
+            action: #selector(openMeetingTranscription),
+            keyEquivalent: ""
+        )
+        openMeetingItem.target = self
+        menu.addItem(openMeetingItem)
+        self.openMeetingTranscriptionMenuItem = openMeetingItem
+
+        let meetingSeparator = NSMenuItem.separator()
+        menu.addItem(meetingSeparator)
+        self.meetingMenuSeparator = meetingSeparator
 
         // Status indicator with hotkey info
         self.statusMenuItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
@@ -673,16 +1044,99 @@ final class MenuBarManager: NSObject, ObservableObject, NSMenuDelegate {
     }
 
     private func updateMenuItemsText() {
+        self.updateMeetingMenuItemsText()
+
         // Update status text with hotkey info
         let hotkeyDisplay = SettingsStore.shared.primaryDictationShortcutDisplayString
         let hotkeyInfo = hotkeyDisplay.isEmpty ? "" : " (\(hotkeyDisplay))"
-        let statusTitle = self.isRecording ? "Recording...\(hotkeyInfo)" : "Ready to Record\(hotkeyInfo)"
+        let statusTitle: String = switch self.meetingMenuPresentation.activity {
+        case .preparing:
+            "Starting Meeting Recording…"
+        case .recording:
+            "Meeting Recording in Progress"
+        case .stopping:
+            "Stopping Meeting Recording…"
+        case .processing:
+            "Transcribing Meeting…"
+        case .interrupted, .failed:
+            self.meetingMenuPresentation.attentionStatus ?? "Meeting Needs Attention"
+        case .inactive, .completed:
+            self.isRecording ? "Recording...\(hotkeyInfo)" : "Ready to Record\(hotkeyInfo)"
+        }
         self.statusMenuItem?.title = statusTitle
         self.copyLastTranscriptMenuItem?.isEnabled = self.canCopyLastTranscript
         self.microphoneMenuItem?.isEnabled = true
 
         // Update rollback availability text
         self.rollbackMenuItem?.isEnabled = SimpleUpdater.shared.hasRollbackBackup()
+    }
+
+    private func updateMeetingMenuItemsText(now: Date = Date()) {
+        let activity = self.meetingMenuPresentation.activity
+        let hasMeetingStatus = activity != .inactive || self.meetingStartError != nil
+        let isRecording = activity == .recording
+        let isStopping = activity == .stopping || self.meetingStopRequested
+
+        self.startMeetingRecordingMenuItem?.isHidden = !self.canStartMeetingRecording && !self.meetingStartRequested
+        self.startMeetingRecordingMenuItem?.isEnabled = self.canStartMeetingRecording &&
+            !self.meetingStartRequested && self.meetingCoordinator != nil
+        self.startMeetingRecordingMenuItem?.title = self.meetingStartRequested
+            ? "Starting Meeting Recording…" : "Start Meeting Recording"
+        self.stopMeetingRecordingMenuItem?.isHidden = !isRecording && !isStopping
+        self.stopMeetingRecordingMenuItem?.isEnabled = isRecording &&
+            !self.meetingStopRequested &&
+            self.stopMeetingRecordingHandler != nil
+        self.stopMeetingRecordingMenuItem?.title = isStopping
+            ? "Stopping Meeting Recording…"
+            : "Stop Meeting Recording"
+        self.meetingStatusMenuItem?.isHidden = !hasMeetingStatus || activity == .completed
+        self.openMeetingTranscriptionMenuItem?.isHidden = !hasMeetingStatus
+        self.meetingMenuSeparator?.isHidden = false
+
+        switch activity {
+        case .inactive:
+            self.openMeetingTranscriptionMenuItem?.title = "Open FluidMeet"
+        case .preparing:
+            self.meetingStatusMenuItem?.title = "Starting meeting recording…"
+            self.openMeetingTranscriptionMenuItem?.title = "Open FluidMeet"
+        case .recording:
+            let source = self.meetingMenuPresentation.sourceName ?? "Meeting"
+            let elapsed = self.meetingMenuPresentation.startedAt.map { Self.elapsedText(now.timeIntervalSince($0)) } ?? "0:00"
+            self.meetingStatusMenuItem?.title = "Recording \(source) · \(elapsed)"
+            self.openMeetingTranscriptionMenuItem?.title = "Open FluidMeet"
+        case .stopping:
+            self.meetingStatusMenuItem?.title = "Finalizing meeting audio…"
+            self.openMeetingTranscriptionMenuItem?.title = "Open FluidMeet"
+        case .processing:
+            self.meetingStatusMenuItem?.title = "Transcribing meeting…"
+            self.openMeetingTranscriptionMenuItem?.title = "Open FluidMeet"
+        case .interrupted:
+            self.meetingStatusMenuItem?.title = self.meetingMenuPresentation.attentionStatus ?? "Recording interrupted"
+            self.openMeetingTranscriptionMenuItem?.title = "Open FluidMeet"
+        case .failed:
+            self.meetingStatusMenuItem?.title = self.meetingMenuPresentation.attentionStatus ?? "Meeting setup failed"
+            self.openMeetingTranscriptionMenuItem?.title = "Open FluidMeet"
+        case .completed:
+            self.openMeetingTranscriptionMenuItem?.title = "Open Latest Meeting Transcript"
+        }
+        if let error = self.meetingStartError {
+            self.meetingStatusMenuItem?.isHidden = false
+            self.meetingStatusMenuItem?.title = "Could not start: \(error)"
+            self.meetingStatusMenuItem?.toolTip = error
+        } else {
+            self.meetingStatusMenuItem?.toolTip = nil
+        }
+    }
+
+    private static func elapsedText(_ duration: TimeInterval) -> String {
+        let total = max(0, Int(duration.rounded(.down)))
+        let hours = total / 3600
+        let minutes = (total % 3600) / 60
+        let seconds = total % 60
+        if hours > 0 {
+            return String(format: "%d:%02d:%02d", hours, minutes, seconds)
+        }
+        return String(format: "%d:%02d", minutes, seconds)
     }
 
     func menuWillOpen(_ menu: NSMenu) {
@@ -1000,6 +1454,58 @@ final class MenuBarManager: NSObject, ObservableObject, NSMenuDelegate {
         self.openNavigationDestination(.customDictionary)
     }
 
+    @objc private func openMeetingTranscription() {
+        self.openNavigationDestination(.meetingTranscription)
+    }
+
+    private var canStartMeetingRecording: Bool {
+        switch self.meetingMenuPresentation.activity {
+        case .inactive, .completed, .interrupted, .failed:
+            return true
+        case .preparing, .recording, .stopping, .processing:
+            return false
+        }
+    }
+
+    @objc private func startMeetingRecording() {
+        Task { @MainActor in
+            await self.startMeetingRecordingInBackground {
+                try await AppServices.shared.startMeetingRecordingFromMenuBar()
+            }
+        }
+    }
+
+    /// Keep source discovery and permission waits inside the duplicate-click guard.
+    /// Errors stay in the menu; starting must never request main-window navigation.
+    func startMeetingRecordingInBackground(using operation: () async throws -> Void) async {
+        guard self.canStartMeetingRecording, !self.meetingStartRequested else { return }
+        self.meetingStartRequested = true
+        self.meetingStartError = nil
+        self.updateMeetingMenuItemsText()
+        defer {
+            self.meetingStartRequested = false
+            self.updateMeetingMenuItemsText()
+        }
+        do {
+            try await operation()
+        } catch {
+            self.meetingStartError = error.localizedDescription
+            DebugLogger.shared.error("Menu action: Start meeting recording failed: \(error.localizedDescription)", source: "MenuBarManager")
+            AccessibilityNotification.Announcement("Meeting recording could not start. \(error.localizedDescription)").post()
+        }
+    }
+
+    @objc private func stopMeetingRecording() {
+        guard self.meetingMenuPresentation.activity == .recording,
+              !self.meetingStopRequested
+        else {
+            return
+        }
+        self.meetingStopRequested = true
+        self.updateMeetingMenuItemsText()
+        self.stopMeetingRecordingHandler?()
+    }
+
     private func openNavigationDestination(_ destination: MenuBarNavigationDestination) {
         self.navigationRequestGeneration &+= 1
         let requestGeneration = self.navigationRequestGeneration
@@ -1052,6 +1558,8 @@ final class MenuBarManager: NSObject, ObservableObject, NSMenuDelegate {
             defer: false
         )
         window.title = "FluidVoice"
+        // Match the SwiftUI main scene when recreating a closed window.
+        window.toolbarStyle = .unified
         window.animationBehavior = .none
         window.minSize = self.mainWindowMinimumSize
         window.isReleasedWhenClosed = false

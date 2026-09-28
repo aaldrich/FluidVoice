@@ -12,6 +12,28 @@ import SwiftUI
 import UserNotifications
 
 class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
+    private static var restartPrepared = false
+    private static var restartInProgress = false
+
+    @MainActor
+    static func restartAfterSaving() {
+        guard !self.restartInProgress else { return }
+        self.restartInProgress = true
+        Task { @MainActor in
+            await TranscriptionHistoryStore.shared.finishPendingWrites()
+            guard TranscriptionHistoryStore.shared.persistenceError == nil else {
+                self.restartInProgress = false
+                DebugLogger.shared.error("Restart cancelled: history could not be saved", source: "AppDelegate")
+                return
+            }
+            UserDefaults.standard.synchronize()
+            await PrivateAIIntegrationService.shared.shutdownForTermination()
+            await AppServices.shared.shutdownForTermination()
+            self.restartPrepared = true
+            NSApp.terminate(nil)
+        }
+    }
+
     private var updateCheckTimer: Timer?
     private var didRevealMainWindowOnLaunch = false
     private var didRequestMainWindowReopen = false
@@ -24,10 +46,37 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        AccessibilityMessagingTimeout.configure()
+        #if DEBUG
+        // Stage 0.5, Trial A, and C2 autoruns must return before Core Audio observers,
+        // logging, AppServices, and UI startup. Each owns one bounded diagnostic stream.
+        if MeetingStage05EvidenceAutorun.startIfRequested() {
+            return
+        }
+        if MeetingExternalReferenceTrialAAutorun.startIfRequested() {
+            return
+        }
+        if MeetingSCKPairedAutorun.startIfRequested() {
+            return
+        }
+        // Must precede every Core Audio observer. Disabled unless explicitly
+        // requested through the Phase 0 diagnostics environment.
+        AudioTopologyDiagnostics.shared.startIfRequested()
+        // App-hosted XCTest otherwise starts the normal UI/audio services alongside the
+        // exclusive VPIO hardware probe. Keep that opt-in diagnostic launch isolated.
+        if ProcessInfo.processInfo.environment["FLUIDVOICE_MIC_PHASE1"] != nil
+            || ProcessInfo.processInfo.environment["FLUIDVOICE_VPIO_ACOUSTIC"] == "1"
+        {
+            return
+        }
+        #endif
         // Bring up file logging + crash handlers immediately during launch.
         _ = FileLogger.shared
         TypingService.startKeyboardLayoutTracking()
         _ = TranscriptionHistoryStore.shared
+        #if DEBUG
+        MeetingDetectorFeasibilityProbe.startIfRequested()
+        #endif
         // Must be read during the launch callback - the current Apple Event identifies
         // login-item launches (used to optionally start silently, see issue #369).
         self.wasLaunchedAsLoginItem = Self.detectLoginItemLaunch()
@@ -42,6 +91,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
 
         // Initialize app settings (dock visibility, etc.)
         SettingsStore.shared.initializeAppSettings()
+        DictationAppSession.shared.start()
+        OnboardingAISetupController.live.resumePendingDownload()
         LocalAPIServer.shared.start()
 
         // Record first-open synchronously before async analytics bootstrap so
@@ -50,6 +101,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         SettingsStore.shared.bootstrapOnboardingState(isTrueFirstOpen: isTrueFirstOpen)
 
         AnalyticsService.shared.bootstrap()
+        SearchIndexCoordinator.shared.start()
 
         // Check for updates automatically if enabled (initial check on launch)
         self.checkForUpdatesAutomatically()
@@ -59,12 +111,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
 
         // Login Items can launch hidden; reveal the real SwiftUI window so ContentView startup runs.
         self.openMainWindowOnLaunch()
+        self.scheduleMeetingAutoDetectorStart()
 
         // Note: App UI is designed with dark color scheme in mind
         // All gradients and effects are optimized for dark mode
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if Self.restartPrepared { return .terminateNow }
         Task { @MainActor in
             await TranscriptionHistoryStore.shared.finishPendingWrites()
             if let error = TranscriptionHistoryStore.shared.persistenceError {
@@ -82,13 +136,51 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        if Self.restartPrepared {
+            // Launch only after this process exits: never overlap two app instances.
+            let helper = Process()
+            helper.executableURL = URL(fileURLWithPath: "/bin/sh")
+            let waitForExit = "i=0; while kill -0 \"$1\" 2>/dev/null; do i=$((i+1)); [ \"$i\" -lt 120 ] || exit 1; sleep 1; done; exec /usr/bin/open \"$2\""
+            helper.arguments = ["-c", waitForExit, "fluidvoice-restart", String(ProcessInfo.processInfo.processIdentifier), Bundle.main.bundlePath]
+            do { try helper.run() } catch {
+                DebugLogger.shared.error("Could not schedule relaunch: \(error)", source: "AppDelegate")
+            }
+        }
         DebugLogger.shared.info("Application will terminate", source: "AppDelegate")
-        self.shutdownPrivateAIRuntimeForTermination()
-        self.shutdownASRRuntimeForTermination()
+        if !Self.restartPrepared {
+            self.shutdownPrivateAIRuntimeForTermination()
+            self.shutdownASRRuntimeForTermination()
+        }
+        self.closeZeppelinForTermination()
         LocalAPIServer.shared.stop()
         // Clean up the update check timer
         self.updateCheckTimer?.invalidate()
         self.updateCheckTimer = nil
+        #if DEBUG
+        AudioTopologyDiagnostics.shared.stop()
+        #endif
+    }
+
+    /// Short deadline: the index is rebuilt from its source stores, so a timeout
+    /// costs a log replay at startup and nothing else.
+    private func closeZeppelinForTermination() {
+        var didClose = false
+        Task {
+            await FluidZeppelinRoot.shared.closeAll()
+            didClose = true
+        }
+
+        let deadline = Date().addingTimeInterval(2)
+        while !didClose, Date() < deadline {
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01))
+        }
+
+        if !didClose {
+            DebugLogger.shared.warning(
+                "Timed out closing Zeppelin namespaces during termination",
+                source: "AppDelegate"
+            )
+        }
     }
 
     private func shutdownASRRuntimeForTermination() {
@@ -98,7 +190,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
             didFinishShutdown = true
         }
 
-        let deadline = Date().addingTimeInterval(8)
+        // Meeting capture can spend up to three seconds stopping its runtime and
+        // four seconds finalizing audio before the durable session save.
+        let deadline = Date().addingTimeInterval(12)
         while !didFinishShutdown, Date() < deadline {
             RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01))
         }
@@ -234,6 +328,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
                 if delay >= 0.6 {
                     self.requestMainWindowReopenIfNeeded(activate: revealWindow)
                 }
+            }
+        }
+    }
+
+    private func scheduleMeetingAutoDetectorStart() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+            Task { @MainActor in
+                _ = AppServices.shared.meetingAutoDetector
             }
         }
     }

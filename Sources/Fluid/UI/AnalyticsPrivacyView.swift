@@ -9,16 +9,16 @@ struct AnalyticsPrivacyView: View {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Anonymous Analytics")
-                        .font(.system(size: 18, weight: .semibold))
+                        .font(.fluidSystem(size: 18, weight: .semibold))
                     Text("Daily activity and optional detailed analytics")
-                        .font(.system(size: 12))
+                        .font(.fluidSystem(size: 12))
                         .foregroundStyle(.secondary)
                 }
 
                 Spacer()
 
                 Button("Done") { self.dismiss() }
-                    .buttonStyle(.bordered)
+                    .fluidOutlinedButton()
             }
 
             Divider().opacity(0.4)
@@ -39,17 +39,18 @@ struct AnalyticsPrivacyView: View {
                     self.bullet("Onboarding steps viewed and completed, including skips.")
                     self.bullet("Transcription and AI provider/model identifiers, counted as daily totals.")
                     self.bullet("Model download source, outcome, and download duration.")
+                    self.bullet("Daily aggregated insertion timing statistics—including toggle-stop-to-paste-dispatch—split by delivery path and outcome.")
 
                     self.sectionTitle("We do NOT collect")
                     self.bullet("Any transcription text or audio.")
                     self.bullet("Selected text, rewrite prompts, or AI responses.")
                     self.bullet("Terminal commands or outputs from Command Mode.")
                     self.bullet("Window titles, app names, file names/paths, clipboard contents, or anything you type.")
-                    self.bullet("Hardware serial numbers, other unique device identifiers, or individual transcription events.")
+                    self.bullet("Hardware serial numbers, other unique device identifiers, target-app identity, or individual transcription and insertion timings/events.")
 
                     self.sectionTitle("How it’s used")
                     self.bullet("Daily activity measures active installations and retention without requiring accounts.")
-                    self.bullet("Optional detailed analytics helps us understand feature adoption, onboarding completion, and model usage.")
+                    self.bullet("Optional detailed analytics helps us understand feature adoption, insertion performance, onboarding completion, and model usage.")
                     self.bullet("Beta timing summaries help us compare ASR and Fluid Intelligence speed across Mac hardware and macOS versions.")
 
                     self.sectionTitle("Control")
@@ -66,7 +67,7 @@ struct AnalyticsPrivacyView: View {
 
     private var contactInfoView: some View {
         Text(self.contactInfoText)
-            .font(.system(size: 13))
+            .font(.fluidSystem(size: 13))
             .foregroundStyle(.primary)
             .padding(12)
             .background(
@@ -99,7 +100,7 @@ struct AnalyticsPrivacyView: View {
 
     private func sectionTitle(_ text: String) -> some View {
         Text(text)
-            .font(.system(size: 12, weight: .semibold))
+            .font(.fluidSystem(size: 12, weight: .semibold))
             .foregroundStyle(self.theme.palette.accent)
             .padding(.top, 4)
     }
@@ -109,7 +110,7 @@ struct AnalyticsPrivacyView: View {
             Text("•")
                 .foregroundStyle(.secondary)
             Text(text)
-                .font(.system(size: 13))
+                .font(.fluidSystem(size: 13))
                 .foregroundStyle(.primary)
             Spacer(minLength: 0)
         }

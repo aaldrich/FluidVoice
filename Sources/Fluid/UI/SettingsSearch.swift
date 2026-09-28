@@ -6,6 +6,7 @@
 //
 
 import AppKit
+import AVFoundation
 import Foundation
 import SwiftUI
 
@@ -20,6 +21,7 @@ enum SettingsSearchTarget: Hashable {
     case analyticsPrivacy
 
     case dictation
+    case shortcuts
     case microphonePermission
     case globalHotkey
     case primaryDictationShortcuts
@@ -40,10 +42,13 @@ enum SettingsSearchTarget: Hashable {
     case dictionarySuggestions
     case accessibilityPermission
     case textFormatting
+    case spokenFormatting
+    case fillerWords
 
     case notifications
     case aiEnhancementFailures
     case microphoneChanges
+    case pasteCheck
 
     case audio
     case inputDevicePriority
@@ -62,7 +67,9 @@ enum SettingsSearchTarget: Hashable {
     case audioStorage
     case debugLogs
     case experimental
+    case returnToStartingField
     case fasterLongDictation
+    case dictionaryMatcherExperiments
     case historyPerformance
 
     var section: SettingsSection {
@@ -79,12 +86,6 @@ enum SettingsSearchTarget: Hashable {
         case .dictation,
              .analyticsPrivacy,
              .microphonePermission,
-             .globalHotkey,
-             .primaryDictationShortcuts,
-             .commandModeShortcut,
-             .editModeShortcut,
-             .cancelRecordingShortcut,
-             .pasteLastTranscriptionShortcut,
              .activationMode,
              .copyToClipboard,
              .textInsertionMode,
@@ -97,11 +98,18 @@ enum SettingsSearchTarget: Hashable {
              .lowLevelBackgroundAudioFilter,
              .pauseMedia,
              .dictionarySuggestions,
-             .accessibilityPermission,
-             .textFormatting:
+             .accessibilityPermission:
             return .dictation
 
-        case .notifications, .aiEnhancementFailures, .microphoneChanges:
+        case .textFormatting, .spokenFormatting, .fillerWords:
+            return .dictationFormatting
+
+        case .shortcuts, .globalHotkey, .primaryDictationShortcuts,
+             .commandModeShortcut, .editModeShortcut, .cancelRecordingShortcut,
+             .pasteLastTranscriptionShortcut:
+            return .shortcuts
+
+        case .notifications, .aiEnhancementFailures, .microphoneChanges, .pasteCheck:
             return .notifications
 
         case .audio, .inputDevicePriority, .outputDevice:
@@ -119,7 +127,7 @@ enum SettingsSearchTarget: Hashable {
         case .dataAndDiagnostics, .backupAndRestore, .debugLogs:
             return .dataAndDiagnostics
 
-        case .experimental, .fasterLongDictation, .historyPerformance:
+        case .experimental, .returnToStartingField, .fasterLongDictation, .dictionaryMatcherExperiments, .historyPerformance:
             return .experimental
         }
     }
@@ -130,6 +138,8 @@ extension SettingsSection {
         switch self {
         case .general: return .general
         case .dictation: return .dictation
+        case .dictationFormatting: return .textFormatting
+        case .shortcuts: return .shortcuts
         case .notifications: return .notifications
         case .audio: return .audio
         case .overlay: return .overlay
@@ -149,6 +159,59 @@ struct SettingsSearchResult: Identifiable, Equatable {
 
     var section: SettingsSection {
         self.target.section
+    }
+}
+
+struct SettingsSearchAvailability {
+    let microphoneAuthorized: Bool
+    let accessibilityEnabled: Bool
+    let savesTranscriptionHistory: Bool
+    let savesAudioWithTranscriptionHistory: Bool
+    let overlayAtBottom: Bool
+
+    static var current: Self {
+        let settings = SettingsStore.shared
+        return Self(
+            microphoneAuthorized: AVCaptureDevice.authorizationStatus(for: .audio) == .authorized,
+            accessibilityEnabled: AXIsProcessTrusted(),
+            savesTranscriptionHistory: settings.saveTranscriptionHistory,
+            savesAudioWithTranscriptionHistory: settings.saveAudioWithTranscriptionHistory,
+            overlayAtBottom: settings.overlayPosition == .bottom
+        )
+    }
+
+    func includes(_ target: SettingsSearchTarget) -> Bool {
+        switch target {
+        case .microphonePermission:
+            return !self.microphoneAuthorized
+        case .accessibilityPermission:
+            return !self.accessibilityEnabled
+        case .primaryDictationShortcuts,
+             .commandModeShortcut,
+             .editModeShortcut,
+             .cancelRecordingShortcut,
+             .pasteLastTranscriptionShortcut,
+             .activationMode,
+             .copyToClipboard,
+             .textInsertionMode,
+             .spokenSend,
+             .transcriptionHistory,
+             .audioHistory,
+             .usageStreak,
+             .skipSilentRecordings,
+             .pauseMedia,
+             .dictionarySuggestions,
+             .analyticsPrivacy:
+            return self.accessibilityEnabled
+        case .audioStorage:
+            return self.accessibilityEnabled &&
+                self.savesTranscriptionHistory &&
+                self.savesAudioWithTranscriptionHistory
+        case .bottomOffset:
+            return self.overlayAtBottom
+        default:
+            return true
+        }
     }
 }
 
@@ -206,6 +269,7 @@ enum SettingsSearchIndex {
             title: "Microphone Permission",
             terms: ["mic access authorization privacy grant denied system settings"]
         ),
+        .init(target: .shortcuts, title: "Shortcuts", terms: ["keyboard hotkeys Smart Fluid Intelligence"]),
         .init(target: .globalHotkey, title: "Global Hotkey", terms: ["keyboard shortcut activation accessibility"]),
         .init(
             target: .primaryDictationShortcuts,
@@ -272,7 +336,7 @@ enum SettingsSearchIndex {
         ),
         .init(
             target: .dictionarySuggestions,
-            title: "Auto-Learn Corrections",
+            title: "Learn from my corrections",
             terms: ["automatic corrections learn words custom dictionary frequency ignore"]
         ),
         .init(
@@ -284,11 +348,13 @@ enum SettingsSearchIndex {
             target: .textFormatting,
             title: "Text Formatting",
             terms: [
-                "Lowercase First Letter Remove Trailing Period Slash Commands @ Formatting",
+                "Dictation Formatting Lowercase First Letter Remove Trailing Period Slash Commands @ Formatting",
                 "Space Between Dictations Smart Capitalization punctuation uppercase symbols mentions",
             ]
         ),
 
+        .init(target: .spokenFormatting, title: "Spoken Formatting", terms: ["punctuation start word symbols new line paragraph"]),
+        .init(target: .fillerWords, title: "Remove Filler Words", terms: ["um uh er filler sounds cleanup"]),
         .init(target: .notifications, title: "Notifications", terms: ["alerts warnings"]),
         .init(
             target: .aiEnhancementFailures,
@@ -299,6 +365,11 @@ enum SettingsSearchIndex {
             target: .microphoneChanges,
             title: "Microphone Changes",
             terms: ["mic device lost changed alert notification"]
+        ),
+        .init(
+            target: .pasteCheck,
+            title: "Paste Check",
+            terms: ["text wasn't inserted not inserted card clipboard verify delivery failure alert"]
         ),
 
         .init(target: .audio, title: "Audio", terms: ["sound devices microphone speaker"]),
@@ -362,6 +433,11 @@ enum SettingsSearchIndex {
             terms: ["Show Debug Logs in App Reveal Log File crash diagnostics troubleshooting"]
         ),
         .init(
+            target: .returnToStartingField,
+            title: "Return to Starting Field",
+            terms: ["experimental dictation paste cursor focus original starting app destination switch apps"]
+        ),
+        .init(
             target: .fasterLongDictation,
             title: "Faster Long Dictation",
             terms: ["experimental Parakeet reuse live windows remaining tail transcription"]
@@ -370,6 +446,11 @@ enum SettingsSearchIndex {
             target: .experimental,
             title: "Experimental",
             terms: ["preview early access optional features"]
+        ),
+        .init(
+            target: .dictionaryMatcherExperiments,
+            title: "Learn from your pronunciation",
+            terms: ["pronunciation voice training matching dictionary experimental"]
         ),
         .init(
             target: .historyPerformance,
@@ -394,6 +475,17 @@ enum SettingsSearchIndex {
             return lhs.result.score > rhs.result.score
         }
         .map(\.result)
+    }
+
+    static func results(
+        for query: String,
+        availability: SettingsSearchAvailability
+    ) -> [SettingsSearchResult] {
+        self.results(for: query).filter { availability.includes($0.target) }
+    }
+
+    static func title(for target: SettingsSearchTarget) -> String {
+        self.entries.first { $0.target == target }?.title ?? target.section.title
     }
 
     static func matchingSections(for query: String) -> [SettingsSection] {
@@ -553,23 +645,107 @@ enum SettingsSearchIndex {
     }
 }
 
-struct SettingsSearchField: NSViewRepresentable {
+/// An `NSSearchField` for a sidebar. Esc clears it. Up, Down and Return are handed
+/// to `onCommand` so a results list can be driven from the keyboard, and Cmd+F
+/// (`Notification.Name.sidebarSearchFocusRequested`) focuses whichever instance
+/// is active.
+struct SidebarSearchField: View {
+    @Environment(\.theme) private var theme
     @Binding var text: String
+    let placeholder: String
     let isActive: Bool
+    var onCommand: (Selector) -> Bool = { _ in false }
+    @State private var isFocused = false
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .foregroundStyle(.secondary)
+                .accessibilityHidden(true)
+            SidebarSearchInput(
+                text: self.$text,
+                placeholder: self.placeholder,
+                isActive: self.isActive,
+                onCommand: self.onCommand,
+                isFocused: self.$isFocused
+            )
+            if !self.text.isEmpty {
+                Button {
+                    self.text = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Clear search")
+            }
+        }
+        .font(.system(size: 14))
+        .padding(.horizontal, self.theme.metrics.spacing.sm)
+        .frame(height: 32)
+        .background(
+            RoundedRectangle(cornerRadius: self.theme.metrics.corners.sm, style: .continuous)
+                .fill(Color.primary.opacity(0.08))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: self.theme.metrics.corners.sm, style: .continuous)
+                .strokeBorder(self.isFocused ? self.theme.palette.accent : .clear, lineWidth: 2)
+                .allowsHitTesting(false)
+        )
+    }
+
+    static func owns(_ editor: NSTextView, in window: NSWindow) -> Bool {
+        SidebarSearchInput.owns(editor, in: window)
+    }
+
+    static func resignFocusIfNeeded(from searchField: NSSearchField, isActive: Bool) {
+        SidebarSearchInput.resignFocusIfNeeded(from: searchField, isActive: isActive)
+    }
+}
+
+private final class SidebarSearchNativeField: NSSearchField {
+    var onFocus: (() -> Void)?
+
+    override func becomeFirstResponder() -> Bool {
+        let accepted = super.becomeFirstResponder()
+        if accepted { self.onFocus?() }
+        return accepted
+    }
+}
+
+private struct SidebarSearchInput: NSViewRepresentable {
+    private static let identifier = NSUserInterfaceItemIdentifier("FluidVoice.SidebarSearchField")
+
+    @Binding var text: String
+    let placeholder: String
+    let isActive: Bool
+    var onCommand: (Selector) -> Bool = { _ in false }
+
+    @Binding var isFocused: Bool
 
     func makeCoordinator() -> Coordinator {
         Coordinator(self)
     }
 
     func makeNSView(context: Context) -> NSSearchField {
-        let searchField = NSSearchField()
+        let searchField = SidebarSearchNativeField()
+        searchField.onFocus = { [weak coordinator = context.coordinator] in
+            coordinator?.parent.isFocused = true
+        }
         searchField.delegate = context.coordinator
-        searchField.placeholderString = "Search Settings"
+        searchField.placeholderString = self.placeholder
         searchField.sendsSearchStringImmediately = true
         searchField.sendsWholeSearchString = false
-        searchField.controlSize = .regular
-        searchField.focusRingType = .default
-        searchField.setAccessibilityLabel("Search Settings")
+        searchField.controlSize = .large
+        searchField.isBezeled = false
+        searchField.drawsBackground = false
+        searchField.focusRingType = .none
+        (searchField.cell as? NSSearchFieldCell)?.searchButtonCell = nil
+        (searchField.cell as? NSSearchFieldCell)?.cancelButtonCell = nil
+        searchField.font = .systemFont(ofSize: 14)
+        searchField.identifier = Self.identifier
+        searchField.setAccessibilityLabel(self.placeholder)
+        context.coordinator.observeFocusRequests(for: searchField)
         return searchField
     }
 
@@ -590,11 +766,48 @@ struct SettingsSearchField: NSViewRepresentable {
         window.makeFirstResponder(nil)
     }
 
-    final class Coordinator: NSObject, NSSearchFieldDelegate {
-        var parent: SettingsSearchField
+    static func owns(_ editor: NSTextView, in window: NSWindow) -> Bool {
+        guard editor.isFieldEditor, let contentView = window.contentView else { return false }
+        var views = [contentView]
+        while let view = views.popLast() {
+            if let searchField = view as? NSSearchField,
+               searchField.identifier == Self.identifier,
+               searchField.currentEditor() === editor
+            {
+                return true
+            }
+            views.append(contentsOf: view.subviews)
+        }
+        return false
+    }
 
-        init(_ parent: SettingsSearchField) {
+    final class Coordinator: NSObject, NSSearchFieldDelegate {
+        var parent: SidebarSearchInput
+        private var focusObserver: NSObjectProtocol?
+
+        init(_ parent: SidebarSearchInput) {
             self.parent = parent
+        }
+
+        deinit {
+            self.focusObserver.map(NotificationCenter.default.removeObserver)
+        }
+
+        func observeFocusRequests(for searchField: NSSearchField) {
+            self.focusObserver = NotificationCenter.default.addObserver(
+                forName: .sidebarSearchFocusRequested, object: nil, queue: .main
+            ) { [weak self, weak searchField] _ in
+                guard let self, self.parent.isActive, let searchField else { return }
+                searchField.window?.makeFirstResponder(searchField)
+            }
+        }
+
+        func controlTextDidBeginEditing(_: Notification) {
+            self.parent.isFocused = true
+        }
+
+        func controlTextDidEndEditing(_: Notification) {
+            self.parent.isFocused = false
         }
 
         func controlTextDidChange(_ notification: Notification) {
@@ -607,11 +820,17 @@ struct SettingsSearchField: NSViewRepresentable {
             textView: NSTextView,
             doCommandBy commandSelector: Selector
         ) -> Bool {
-            guard commandSelector == #selector(NSResponder.cancelOperation(_:)) else { return false }
+            guard commandSelector == #selector(NSResponder.cancelOperation(_:)) else {
+                return self.parent.onCommand(commandSelector)
+            }
             textView.string = ""
             control.stringValue = ""
             self.parent.text = ""
             return true
         }
     }
+}
+
+extension Notification.Name {
+    static let sidebarSearchFocusRequested = Notification.Name("FluidVoice.sidebarSearchFocusRequested")
 }

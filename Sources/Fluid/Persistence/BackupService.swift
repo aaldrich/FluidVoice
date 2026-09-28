@@ -21,6 +21,8 @@ struct SettingsBackupPayload: Codable, Equatable {
     let selectedCohereLanguage: SettingsStore.CohereLanguage
     let selectedNemotronLanguage: SettingsStore.NemotronLanguage?
     let selectedAppleSpeechLocaleIdentifier: String?
+    /// Stable final-meeting backend ID. Optional so backups from before backend selection decode.
+    let meetingTranscriptionBackendID: String?
     let hotkeyShortcut: HotkeyShortcut
     // Older backup files only contain hotkeyShortcut; nil restores that legacy single shortcut.
     // swiftlint:disable:next discouraged_optional_collection
@@ -40,7 +42,7 @@ struct SettingsBackupPayload: Codable, Equatable {
     let rewriteModeSelectedModel: String?
     let rewriteModeSelectedProviderID: String
     let rewriteModeLinkedToGlobal: Bool
-    let cancelRecordingHotkeyShortcut: HotkeyShortcut
+    let cancelRecordingHotkeyShortcut: HotkeyShortcut?
     // Optional so older backup files (which predate this setting) still decode.
     let pasteLastTranscriptionHotkeyShortcut: HotkeyShortcut?
     let pasteLastTranscriptionShortcutEnabled: Bool?
@@ -50,7 +52,9 @@ struct SettingsBackupPayload: Codable, Equatable {
     let accentColorOption: SettingsStore.AccentColorOption
     let transcriptionStartSound: SettingsStore.TranscriptionStartSound
     let transcriptionSoundVolume: Float
-    let transcriptionSoundIndependentVolume: Bool
+    // Independent Volume was removed, but the key is still written (always false) so backups
+    // from this build decode on app versions that require it. Ignored on restore.
+    let transcriptionSoundIndependentVolume: Bool?
     let autoUpdateCheckEnabled: Bool
     let betaReleasesEnabled: Bool
     let enableDebugLogs: Bool
@@ -60,6 +64,8 @@ struct SettingsBackupPayload: Codable, Equatable {
     let enableStreamingPreview: Bool
     // Optional so backups created before incremental Parakeet finalization still decode.
     let experimentalParakeetUnifiedFinalEnabled: Bool?
+    // Optional to preserve compatibility with older backups.
+    let returnDictationToStartingField: Bool?
     // Optional so backups created before History performance details still decode.
     let showHistoryPerformanceMetrics: Bool?
     // Optional so backups created before silent-recording detection still decode.
@@ -86,6 +92,12 @@ struct SettingsBackupPayload: Codable, Equatable {
     let overlayPosition: SettingsStore.OverlayPosition
     let overlayBottomOffset: Double
     let overlaySize: SettingsStore.OverlaySize
+    let overlayMaterial: SettingsStore.OverlayMaterial?
+    let overlayGlassOpacity: Double?
+    let overlayTint: SettingsStore.OverlayTint?
+    let overlayHighlight: Double?
+    let overlayClosingAnimationEnabled: Bool?
+    let meetingOverlayPreference: MeetingOverlayPreference?
     let transcriptionPreviewCharLimit: Int
     let userTypingWPM: Int
     let saveTranscriptionHistory: Bool
@@ -93,6 +105,7 @@ struct SettingsBackupPayload: Codable, Equatable {
     let audioHistoryBudgetGB: Double?
     let notifyAIProcessingFailures: Bool?
     let showMicrophoneChangeAlerts: Bool?
+    let showPasteCheckAlerts: Bool?
     let weekendsDontBreakStreak: Bool
     let fillerWords: [String]
     let removeFillerWordsEnabled: Bool

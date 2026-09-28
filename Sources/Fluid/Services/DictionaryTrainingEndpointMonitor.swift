@@ -28,9 +28,52 @@ final class DictionaryTrainingEndpointMonitor {
 
     private init() {}
 
+    func meetingResidencyParticipant() -> MeetingModelParticipant {
+        MeetingModelParticipant(
+            owner: "dictionary-vad",
+            snapshot: {
+                let generation = DictionaryMatcherExperiment.generation
+                guard let resident = await self.detector.residencySnapshot() else { return nil }
+                return MeetingResidentModel(id: resident.id, configuration: generation)
+            },
+            suspend: {
+                self.stop()
+                await self.detector.unloadForMeeting()
+            },
+            restore: { snapshot in
+                _ = try await Self.prepareIfCurrent(
+                    expectedGeneration: snapshot.configuration,
+                    prepare: { try await self.detector.prepare() },
+                    unload: { await self.detector.unloadForMeeting() }
+                )
+            }
+        )
+    }
+
+    /// Eligibility must survive the actual load. Disabling and re-enabling changes the
+    /// generation, so neither an old snapshot nor a late model completion can revive it.
+    static func prepareIfCurrent(
+        expectedGeneration: String,
+        isEnabled: () -> Bool = { DictionaryMatcherExperiment.sharedFeaturesEnabled },
+        generation: () -> String = { DictionaryMatcherExperiment.generation },
+        prepare: () async throws -> Void,
+        unload: () async -> Void
+    ) async throws -> Bool {
+        guard isEnabled(), generation() == expectedGeneration, !Task.isCancelled else { return false }
+        try await prepare()
+        guard isEnabled(), generation() == expectedGeneration, !Task.isCancelled else {
+            await unload()
+            return false
+        }
+        return true
+    }
+
     func prepare() async {
+        guard DictionaryMatcherExperiment.sharedFeaturesEnabled else { return }
+        let generation = DictionaryMatcherExperiment.generation
         do {
             try await self.detector.prepare()
+            guard DictionaryMatcherExperiment.sharedFeaturesEnabled, generation == DictionaryMatcherExperiment.generation, !Task.isCancelled else { return }
             DebugLogger.shared.debug(
                 "Dictionary training endpoint detector ready",
                 source: "DictionaryTrainingEndpointMonitor"
@@ -48,11 +91,15 @@ final class DictionaryTrainingEndpointMonitor {
         onSpeechEnded: @escaping @MainActor () -> Void
     ) {
         self.stop()
+        guard DictionaryMatcherExperiment.sharedFeaturesEnabled else { return }
         let detector = self.detector
+        let generation = DictionaryMatcherExperiment.generation
+        guard let captureToken = asr.dictionaryCaptureToken else { return }
 
         self.task = Task { @MainActor [weak asr] in
             do {
-                guard let asr,
+                guard DictionaryMatcherExperiment.sharedFeaturesEnabled, generation == DictionaryMatcherExperiment.generation, !Task.isCancelled, let asr,
+                      asr.dictionaryCaptureToken == captureToken,
                       let detectorSession = try await detector.beginSession()
                 else {
                     return
@@ -63,7 +110,8 @@ final class DictionaryTrainingEndpointMonitor {
 
                 var cursor = DictionaryTrainingAudioCursor(generation: asr.dictionaryTrainingAudioGeneration)
                 while !Task.isCancelled {
-                    guard asr.isRunning, asr.isDictionaryTrainingCaptureActive else { return }
+                    guard DictionaryMatcherExperiment.sharedFeaturesEnabled, generation == DictionaryMatcherExperiment.generation, asr.isRunning,
+                          asr.dictionaryCaptureToken == captureToken else { return }
                     cursor.synchronize(generation: asr.dictionaryTrainingAudioGeneration)
 
                     let chunk = asr.dictionaryTrainingAudioChunk(
@@ -82,9 +130,9 @@ final class DictionaryTrainingEndpointMonitor {
                     ) else {
                         continue
                     }
-                    guard !Task.isCancelled,
+                    guard DictionaryMatcherExperiment.sharedFeaturesEnabled, generation == DictionaryMatcherExperiment.generation, !Task.isCancelled,
                           asr.isRunning,
-                          asr.isDictionaryTrainingCaptureActive
+                          asr.dictionaryCaptureToken == captureToken
                     else {
                         return
                     }

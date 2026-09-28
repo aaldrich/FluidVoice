@@ -19,19 +19,8 @@ extension VoiceEngineSettingsView {
             return model != activeModel
         }
 
-        return ThemedCard(hoverEffect: false) {
-            VStack(alignment: .leading, spacing: 14) {
-                // Header
-                HStack(spacing: 10) {
-                    Image(systemName: "waveform")
-                        .font(.title2)
-                        .foregroundStyle(self.theme.palette.accent)
-                    Text("Voice Engine")
-                        .font(.title3)
-                        .fontWeight(.semibold)
-                    Spacer()
-                }
-
+        return VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: FluidPageLayout.sectionSpacing) {
                 // Stats Panel - Dynamic bars that update based on selected model
                 self.modelStatsPanel
                     .padding(12)
@@ -42,7 +31,12 @@ extension VoiceEngineSettingsView {
                                 RoundedRectangle(cornerRadius: 12)
                                     .stroke(self.theme.palette.cardBorder.opacity(0.3), lineWidth: 1)
                             )
-                            .shadow(color: self.theme.metrics.cardShadow.color.opacity(self.theme.metrics.cardShadow.opacity), radius: self.theme.metrics.cardShadow.radius, x: self.theme.metrics.cardShadow.x, y: self.theme.metrics.cardShadow.y)
+                            .shadow(
+                                color: self.theme.metrics.cardShadow.color.opacity(self.theme.metrics.cardShadow.opacity),
+                                radius: self.theme.metrics.cardShadow.radius,
+                                x: self.theme.metrics.cardShadow.x,
+                                y: self.theme.metrics.cardShadow.y
+                            )
                     )
 
                 ScrollView(.vertical, showsIndicators: false) {
@@ -62,24 +56,9 @@ extension VoiceEngineSettingsView {
                                     }
                                 }
                             } label: {
-                                HStack(spacing: 6) {
-                                    Image(systemName: "line.3.horizontal.decrease.circle")
-                                        .font(self.theme.typography.bodySmallStrong)
-                                    Text("Filter: \(self.viewModel.providerFilter.rawValue)")
-                                        .font(self.theme.typography.bodySmallStrong)
-                                }
-                                .foregroundStyle(self.voiceEngineTitleText)
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 6)
-                                .background(
-                                    RoundedRectangle(cornerRadius: 9)
-                                        .fill(self.theme.palette.cardBackground.opacity(0.8))
-                                        .overlay(
-                                            RoundedRectangle(cornerRadius: 9)
-                                                .stroke(self.theme.palette.cardBorder.opacity(0.5), lineWidth: 1)
-                                        )
-                                )
+                                Text("Filter: \(self.viewModel.providerFilter.rawValue)")
                             }
+                            .fluidDropdownStyle()
                             Menu {
                                 ForEach(ModelSortOption.allCases) { option in
                                     Button(option.rawValue) {
@@ -87,22 +66,9 @@ extension VoiceEngineSettingsView {
                                     }
                                 }
                             } label: {
-                                HStack(spacing: 6) {
-                                    Text("Sort by: \(self.viewModel.modelSortOption.rawValue)")
-                                        .font(self.theme.typography.bodySmallStrong)
-                                }
-                                .foregroundStyle(self.voiceEngineTitleText)
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 6)
-                                .background(
-                                    RoundedRectangle(cornerRadius: 9)
-                                        .fill(self.theme.palette.cardBackground.opacity(0.8))
-                                        .overlay(
-                                            RoundedRectangle(cornerRadius: 9)
-                                                .stroke(self.theme.palette.cardBorder.opacity(0.5), lineWidth: 1)
-                                        )
-                                )
+                                Text("Sort by: \(self.viewModel.modelSortOption.rawValue)")
                             }
+                            .fluidDropdownStyle()
                         }
 
                         // Active + Other models list
@@ -146,17 +112,16 @@ extension VoiceEngineSettingsView {
                                     RoundedRectangle(cornerRadius: 12)
                                         .stroke(self.theme.palette.cardBorder.opacity(0.3), lineWidth: 1)
                                 )
-                                .shadow(color: self.theme.metrics.cardShadow.color.opacity(self.theme.metrics.cardShadow.opacity), radius: self.theme.metrics.cardShadow.radius, x: self.theme.metrics.cardShadow.x, y: self.theme.metrics.cardShadow.y)
+                                .shadow(
+                                    color: self.theme.metrics.cardShadow.color.opacity(self.theme.metrics.cardShadow.opacity),
+                                    radius: self.theme.metrics.cardShadow.radius,
+                                    x: self.theme.metrics.cardShadow.x,
+                                    y: self.theme.metrics.cardShadow.y
+                                )
                         )
-
-                        Divider().padding(.vertical, 4)
-
-                        // Filler Words Section
-                        self.fillerWordsSection
                     }
                 }
             }
-            .padding(14)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
@@ -164,7 +129,6 @@ extension VoiceEngineSettingsView {
     /// Stats panel showing speed/accuracy bars that animate when model changes
     var modelStatsPanel: some View {
         let model = self.viewModel.previewSpeechModel
-        let supportsCustomWords = model.supportsCustomVocabulary
 
         return VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .center, spacing: 20) {
@@ -172,12 +136,12 @@ extension VoiceEngineSettingsView {
                     VStack(alignment: .leading, spacing: 4) {
                         HStack {
                             Text(model.humanReadableName)
-                                .font(.system(size: 16, weight: .bold))
+                                .font(.fluidSystem(size: 16, weight: .bold))
                                 .foregroundStyle(self.theme.palette.primaryText)
 
                             if let badge = model.badgeText {
                                 Text(badge)
-                                    .font(.caption2)
+                                    .font(.fluidSystem(.caption2))
                                     .fontWeight(.semibold)
                                     .padding(.horizontal, 6)
                                     .padding(.vertical, 2)
@@ -269,38 +233,6 @@ extension VoiceEngineSettingsView {
                 .frame(width: 140, alignment: .center)
                 .animation(.spring(response: 0.5, dampingFraction: 0.7), value: model.id)
             }
-
-            if supportsCustomWords {
-                HStack(alignment: .center, spacing: 10) {
-                    Image(systemName: "checkmark.seal.fill")
-                        .font(self.theme.typography.bodySmall)
-                        .foregroundStyle(Color.fluidGreen)
-
-                    Text("Custom Words supported on Parakeet. Teach names, product terms, and uncommon words for better accuracy.")
-                        .font(self.theme.typography.bodySmall)
-                        .foregroundStyle(self.voiceEngineSecondaryText)
-                        .lineLimit(3)
-
-                    Spacer(minLength: 8)
-
-                    Button("Open Custom Dictionary") {
-                        NotificationCenter.default.post(name: .openCustomDictionaryFromVoiceEngine, object: nil)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(Color.fluidGreen)
-                    .controlSize(.small)
-                }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 8)
-                .background(
-                    RoundedRectangle(cornerRadius: 8)
-                        .fill(Color.fluidGreen.opacity(0.10))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 8)
-                                .stroke(Color.fluidGreen.opacity(0.30), lineWidth: 1)
-                        )
-                )
-            }
         }
         .padding(.vertical, 6)
     }
@@ -333,7 +265,7 @@ extension VoiceEngineSettingsView {
                 HStack(spacing: 12) {
                     HStack(spacing: 4) {
                         Image(systemName: "bolt.fill")
-                            .font(.system(size: 11))
+                            .font(.fluidSystem(size: 11))
                             .foregroundStyle(.yellow)
                         Text("Speed \(Int(model.speedPercent * 100))%")
                             .font(self.theme.typography.bodyStrong)
@@ -342,7 +274,7 @@ extension VoiceEngineSettingsView {
 
                     HStack(spacing: 4) {
                         Image(systemName: "target")
-                            .font(.system(size: 11))
+                            .font(.fluidSystem(size: 11))
                             .foregroundStyle(Color.fluidGreen)
                         Text("Acc \(Int(model.accuracyPercent * 100))%")
                             .font(self.theme.typography.bodyStrong)
@@ -390,7 +322,7 @@ extension VoiceEngineSettingsView {
                     Button(self.viewModel.isCancellingModelDownload ? "Cancelling…" : "Cancel") {
                         self.viewModel.cancelSpeechModelDownload()
                     }
-                    .buttonStyle(.bordered)
+                    .fluidOutlinedButton()
                     .controlSize(.small)
                     .disabled(self.viewModel.isCancellingModelDownload)
                 }
@@ -431,7 +363,7 @@ extension VoiceEngineSettingsView {
                     Button(self.viewModel.asr.isCancellingModelPreparation ? "Cancelling…" : "Cancel") {
                         self.viewModel.cancelActiveModelPreparation()
                     }
-                    .buttonStyle(.bordered)
+                    .fluidOutlinedButton()
                     .controlSize(.small)
                     .disabled(self.viewModel.asr.isCancellingModelPreparation)
                 }
@@ -451,11 +383,7 @@ extension VoiceEngineSettingsView {
                         Button("Activate") {
                             self.viewModel.activateSpeechModel(model)
                         }
-                        .buttonStyle(.borderedProminent)
-                        .controlSize(.small)
-                        .tint(Color.fluidGreen)
-                        .fontWeight(.semibold)
-                        .shadow(color: Color.fluidGreen.opacity(0.35), radius: 4, x: 0, y: 1)
+                        .fluidGlassAction(quiet: true)
                         .disabled(self.viewModel.areSpeechModelActionsBlocked)
                     }
 
@@ -465,13 +393,14 @@ extension VoiceEngineSettingsView {
                                 self.viewModel.deleteSpeechModel(model)
                             } label: {
                                 Image(systemName: "trash")
-                                    .font(.system(size: 15))
+                                    .font(.fluidSystem(size: 15))
                                     .foregroundStyle(.red.opacity(0.7))
                             }
                             .buttonStyle(.plain)
                             .disabled(self.viewModel.areSpeechModelActionsBlocked)
-                            .offset(x: isSelected ? 0 : 12)
                             .opacity(isSelected ? 1 : 0)
+                            .allowsHitTesting(isSelected)
+                            .accessibilityHidden(!isSelected)
                         }
                     }
                 }
@@ -484,7 +413,7 @@ extension VoiceEngineSettingsView {
                                     self.viewModel.openExternalModelSource(for: model)
                                 } label: {
                                     Image(systemName: "arrow.up.right.square")
-                                        .font(.system(size: 14))
+                                        .font(.fluidSystem(size: 14))
                                 }
                                 .buttonStyle(.plain)
                                 .foregroundStyle(self.voiceEngineTertiaryText)
@@ -495,13 +424,12 @@ extension VoiceEngineSettingsView {
                                 self.viewModel.previewSpeechModel = model
                                 self.viewModel.downloadSpeechModel(model)
                             }
-                            .buttonStyle(.borderedProminent)
-                            .controlSize(.small)
-                            .tint(.blue)
+                            .fluidGlassAction(prominent: true)
                             .disabled(self.viewModel.areSpeechModelActionsBlocked)
                         }
-                        .offset(x: isSelected ? 0 : 16)
                         .opacity(isSelected ? 1 : 0)
+                        .allowsHitTesting(isSelected)
+                        .accessibilityHidden(!isSelected)
                     } else {
                         Text("Not downloaded")
                             .font(self.theme.typography.bodySmall)
@@ -512,12 +440,11 @@ extension VoiceEngineSettingsView {
                             self.viewModel.previewSpeechModel = model
                             self.viewModel.downloadSpeechModel(model)
                         }
-                        .buttonStyle(.borderedProminent)
-                        .controlSize(.small)
-                        .tint(.blue)
+                        .fluidGlassAction(prominent: true)
                         .disabled(self.viewModel.areSpeechModelActionsBlocked)
-                        .offset(x: isSelected ? 0 : 16)
                         .opacity(isSelected ? 1 : 0)
+                        .allowsHitTesting(isSelected)
+                        .accessibilityHidden(!isSelected)
                     }
                 }
                 .frame(width: model.requiresExternalArtifacts ? 150 : 120, alignment: .trailing)
@@ -565,10 +492,9 @@ extension VoiceEngineSettingsView {
                         }
                     }
                 }
-            } label: {
-                self.languageChipLabel(self.settings.selectedCohereLanguage.displayName)
-            }
-            .buttonStyle(.plain)
+            } label: { Label(self.settings.selectedCohereLanguage.displayName, systemImage: "globe") }
+                .fluidDropdownStyle()
+                .buttonStyle(.plain)
         } else if model == .nemotronOffline || model == .nemotronStreaming || model == .nemotronStreaming320 {
             self.nemotronLanguagePickerButton
         }
@@ -681,28 +607,15 @@ extension VoiceEngineSettingsView {
     }
 
     private func languageChipLabel(_ title: String) -> some View {
-        HStack(spacing: 5) {
-            Image(systemName: "globe")
-                .font(self.theme.typography.bodySmall)
-                .foregroundStyle(self.theme.palette.accent)
-            Text(title)
-                .lineLimit(1)
-                .fontWeight(.semibold)
-            Image(systemName: "chevron.down")
-                .font(.system(size: 9, weight: .semibold))
-                .foregroundStyle(self.voiceEngineTertiaryText)
+        HStack(spacing: 10) {
+            Image(systemName: "globe").foregroundStyle(self.theme.palette.accent)
+            Text(title).lineLimit(1)
+            FluidDropdownChevron()
         }
-        .font(self.theme.typography.bodySmallStrong)
-        .frame(minHeight: 24)
-        .padding(.horizontal, 9)
-        .background(
-            Capsule()
-                .fill(self.theme.palette.accent.opacity(0.10))
-                .overlay(
-                    Capsule()
-                        .stroke(self.theme.palette.accent.opacity(0.28), lineWidth: 1)
-                )
-        )
+        .font(self.theme.typography.bodySmall)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+        .fluidDropdownSurface()
     }
 
     private func speechModelSubtitle(for model: SettingsStore.SpeechModel) -> String {
@@ -830,32 +743,6 @@ extension VoiceEngineSettingsView {
             .overlay(RoundedRectangle(cornerRadius: 8).stroke(self.theme.palette.cardBorder.opacity(0.5), lineWidth: 1)))
     }
 
-    var fillerWordsSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .center) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Remove Filler Words")
-                        .font(self.theme.typography.bodyStrong)
-                        .foregroundStyle(self.voiceEngineTitleText)
-                    Text("Automatically remove filler sounds like 'um', 'uh', 'er' from transcriptions")
-                        .font(self.theme.typography.bodySmall)
-                        .foregroundStyle(self.voiceEngineSecondaryText)
-                }
-                Spacer()
-                Toggle("", isOn: self.$viewModel.removeFillerWordsEnabled)
-                    .toggleStyle(.switch)
-                    .labelsHidden()
-                    .onChange(of: self.viewModel.removeFillerWordsEnabled) { _, newValue in
-                        self.settings.removeFillerWordsEnabled = newValue
-                    }
-            }
-
-            if self.viewModel.removeFillerWordsEnabled {
-                FillerWordsEditor()
-            }
-        }
-    }
-
     // MARK: - Speech Model Logo View
 
     private func speechModelLogoView(for model: SettingsStore.SpeechModel) -> some View {
@@ -869,7 +756,7 @@ extension VoiceEngineSettingsView {
 
             if model.usesAppleLogo {
                 Image(systemName: "apple.logo")
-                    .font(.system(size: 14, weight: .medium))
+                    .font(.fluidSystem(size: 14, weight: .medium))
                     .foregroundStyle(.primary)
             } else if let imageName {
                 Image(imageName)
@@ -879,7 +766,7 @@ extension VoiceEngineSettingsView {
                     .frame(width: isNvidia ? 24 : 18, height: isNvidia ? 24 : 18)
             } else {
                 Text(String(model.brandName.prefix(2)).uppercased())
-                    .font(.system(size: 10, weight: .bold, design: .rounded))
+                    .font(.fluidSystem(size: 10, weight: .bold, design: .rounded))
                     .foregroundStyle(self.theme.palette.primaryText)
             }
         }

@@ -21,7 +21,7 @@ struct VoiceEngineSettingsScreen: View {
             settings: self.viewModel.settings,
             theme: self.theme
         )
-        .padding(14)
+        .fluidPageContent(width: .expanding)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 }
@@ -32,6 +32,9 @@ struct AIEnhancementSettingsScreen: View {
     @Binding var selectedConfigurationSection: AIEnhancementConfigurationSection
     @Binding var activeShortcutRecordingTarget: ShortcutRecordingTarget?
     @Binding var shortcutRecordingMessage: String?
+    /// A prompt picked in the sidebar search. Opening its editor is the reveal; the
+    /// binding is cleared so the same prompt can be picked again later.
+    @Binding var revealTarget: AppSearchHit.Target?
 
     @StateObject private var viewModel: AIEnhancementSettingsViewModel
     @StateObject private var privateAIController: PrivateAISettingsController
@@ -41,13 +44,15 @@ struct AIEnhancementSettingsScreen: View {
         theme: AppTheme,
         selectedConfigurationSection: Binding<AIEnhancementConfigurationSection> = .constant(.providers),
         activeShortcutRecordingTarget: Binding<ShortcutRecordingTarget?> = .constant(nil),
-        shortcutRecordingMessage: Binding<String?> = .constant(nil)
+        shortcutRecordingMessage: Binding<String?> = .constant(nil),
+        revealTarget: Binding<AppSearchHit.Target?> = .constant(nil)
     ) {
         self.menuBarManager = menuBarManager
         self.theme = theme
         _selectedConfigurationSection = selectedConfigurationSection
         _activeShortcutRecordingTarget = activeShortcutRecordingTarget
         _shortcutRecordingMessage = shortcutRecordingMessage
+        _revealTarget = revealTarget
         let enhancementModel = AIEnhancementSettingsViewModel(
             settings: SettingsStore.shared,
             menuBarManager: menuBarManager,
@@ -59,7 +64,7 @@ struct AIEnhancementSettingsScreen: View {
 
     var body: some View {
         ScrollView(.vertical, showsIndicators: false) {
-            VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: FluidPageLayout.sectionSpacing) {
                 AIEnhancementSettingsView(
                     viewModel: self.viewModel,
                     privateAIController: self.privateAIController,
@@ -71,7 +76,14 @@ struct AIEnhancementSettingsScreen: View {
                     shortcutRecordingMessage: self.$shortcutRecordingMessage
                 )
             }
-            .padding(14)
+            .fluidPageContent(width: .expanding)
+        }
+        .task(id: self.revealTarget) {
+            guard case let .prompt(id) = self.revealTarget,
+                  let profile = self.viewModel.settings.dictationPromptProfiles.first(where: { $0.id == id })
+            else { return }
+            self.viewModel.openEditor(for: profile)
+            self.revealTarget = nil
         }
     }
 }

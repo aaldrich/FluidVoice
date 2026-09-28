@@ -348,7 +348,9 @@ final class MonitorTopologyRecoveryTests: XCTestCase {
         let probe = FailedDeviceLivenessProbe()
         let controller = makeRecoveryController(input, timeout: nil, deviceLivenessReader: { probe.read($0) })
         _ = try await controller.start(deviceID: 144, deviceName: "Healthy", reason: "recording")
-        for _ in 0..<100 { controller.noteHardwareTopologyChanged() }
+        for _ in 0..<100 {
+            controller.noteHardwareTopologyChanged()
+        }
         try await waitForTopologyCheck(controller)
         input.emit()
         XCTAssertTrue(probe.deviceIDs.isEmpty)
@@ -395,7 +397,9 @@ final class MonitorTopologyRecoveryTests: XCTestCase {
         try await waitForTopologyCheck(controller)
         for alive in [true, nil] as [Bool?] {
             probe.setAlive(alive)
-            for _ in 0..<100 { controller.noteHardwareTopologyChanged() }
+            for _ in 0..<100 {
+                controller.noteHardwareTopologyChanged()
+            }
             try await waitForTopologyCheck(controller)
             XCTAssertTrue(controller.isRecoveringHardware)
             XCTAssertEqual(input.count("prepare"), 1)
@@ -412,7 +416,9 @@ final class MonitorTopologyRecoveryTests: XCTestCase {
         let controller = makeRecoveryController(input, deviceLivenessReader: { probe.read($0) })
         defer { input.release.signal() }
         _ = try? await controller.start(deviceID: 144, deviceName: "Removed", reason: "failed_start")
-        for _ in 0..<100 { controller.noteHardwareTopologyChanged() }
+        for _ in 0..<100 {
+            controller.noteHardwareTopologyChanged()
+        }
         try await Task.sleep(nanoseconds: 20_000_000)
         XCTAssertTrue(controller.isRecoveringHardware)
         XCTAssertTrue(probe.deviceIDs.isEmpty, "Do not check or unlock while native startup owns capture")
@@ -855,6 +861,20 @@ private final nonisolated class RecoveryInput: DirectCoreAudioInputControlling, 
 
 #if canImport(FluidVoice_Debug)
 final class AudioRouteRecoveryIntegrationTests: XCTestCase {
+    // Pronunciation features are opt-in in the app; these tests exercise the enabled paths.
+    private var priorSharedFeaturesFlag: Any?
+
+    override func setUp() {
+        super.setUp()
+        self.priorSharedFeaturesFlag = UserDefaults.standard.object(forKey: "DictionarySharedFeatureMatcherEnabled")
+        UserDefaults.standard.set(true, forKey: "DictionarySharedFeatureMatcherEnabled")
+    }
+
+    override func tearDown() {
+        UserDefaults.standard.set(self.priorSharedFeaturesFlag, forKey: "DictionarySharedFeatureMatcherEnabled")
+        super.tearDown()
+    }
+
     @MainActor
     func testStartupTriesNewMicrophoneMissingFromDeviceCache() async throws {
         try await withASRRecoveryFixture(queryDelay: 0) { fixture in
@@ -1338,7 +1358,15 @@ private final class ASRRecoveryFixture {
     private let expectedPriority: [String]
     private let prefix: [Float] = [0.125, 0.25, 0.375]
 
-    init(queryDelay: TimeInterval, queryFailures: Int, liveInputs: [AudioDevice.Device], externalStopDelay: TimeInterval, operationTimeout: TimeInterval?, firstQueryDelay: TimeInterval?, builtInStartDelay: TimeInterval) {
+    init(
+        queryDelay: TimeInterval,
+        queryFailures: Int,
+        liveInputs: [AudioDevice.Device],
+        externalStopDelay: TimeInterval,
+        operationTimeout: TimeInterval?,
+        firstQueryDelay: TimeInterval?,
+        builtInStartDelay: TimeInterval
+    ) {
         let settings = SettingsStore.shared
         let priority = settings.microphonePriority
         let preferred = settings.preferredInputDeviceUID
@@ -1369,7 +1397,13 @@ private final class ASRRecoveryFixture {
         self.providerID = settings.selectedProviderID
         let service = ASRService()
         self.service = service
-        let hardware = ASRRecoveryHardware(queryDelay: queryDelay, queryFailures: queryFailures, externalStopDelay: externalStopDelay, firstQueryDelay: firstQueryDelay, builtInStartDelay: builtInStartDelay)
+        let hardware = ASRRecoveryHardware(
+            queryDelay: queryDelay,
+            queryFailures: queryFailures,
+            externalStopDelay: externalStopDelay,
+            firstQueryDelay: firstQueryDelay,
+            builtInStartDelay: builtInStartDelay
+        )
         self.hardware = hardware
         self.controller = DirectCoreAudioLifecycleController(
             packetHandler: service.recoveryPacketHandlerForTesting,
